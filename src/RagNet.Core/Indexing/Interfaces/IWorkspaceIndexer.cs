@@ -6,6 +6,7 @@ public interface IWorkspaceIndexer
         string workspacePath,
         IReadOnlyList<string>? excludeDirectories = null,
         bool force = false,
+        string? indexProfile = null,
         CancellationToken cancellationToken = default,
         IProgress<IndexingProgress>? progress = null);
 
@@ -13,6 +14,7 @@ public interface IWorkspaceIndexer
         string workspaceGroup,
         IReadOnlyList<string>? excludeDirectories = null,
         bool force = false,
+        string? indexProfile = null,
         CancellationToken cancellationToken = default,
         IProgress<IndexingProgress>? progress = null);
 
@@ -30,6 +32,7 @@ public interface IWorkspaceIndexer
         string? workspaceGroup,
         string? contentType = null,
         string? retrievalMode = null,
+        string? searchProfile = null,
         CancellationToken cancellationToken = default);
 
     Task<string> GetCodeContextAsync(string filePath, int line, int before, int after, CancellationToken cancellationToken = default);

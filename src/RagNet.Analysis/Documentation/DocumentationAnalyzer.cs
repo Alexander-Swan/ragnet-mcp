@@ -1,12 +1,20 @@
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Options;
+using RagNet.Mcp.Analyzers;
 using RagNet.Mcp.Analyzers.Common;
 using RagNet.Mcp.Analyzers.Interfaces;
+using RagNet.Mcp.Configuration;
 using RagNet.Mcp.Indexing;
 
 namespace RagNet.Mcp.Analyzers.Documentation;
 
-public sealed partial class DocumentationAnalyzer : ICodeAnalyzer
+public sealed partial class DocumentationAnalyzer : IContentAwareAnalyzer
 {
+    private const double StrongOverrideConfidence = 0.95;
+    private const double BaselineDocumentationConfidence = 0.55;
+
+    private readonly RagNetOptions _options;
+
     private static readonly Dictionary<string, string> ExtensionLanguages = new(StringComparer.OrdinalIgnoreCase)
     {
         [".md"] = "markdown",
@@ -19,17 +27,78 @@ public sealed partial class DocumentationAnalyzer : ICodeAnalyzer
         [".asciidoc"] = "asciidoc"
     };
 
-    public bool CanAnalyze(string filePath)
+    public DocumentationAnalyzer()
+        : this(null)
+    {
+    }
+
+    public DocumentationAnalyzer(IOptions<RagNetOptions>? options)
+    {
+        _options = options?.Value ?? new RagNetOptions();
+    }
+
+    public bool CanAnalyze(string filePath) => ExtensionLanguages.ContainsKey(Path.GetExtension(filePath));
+
+    public async Task<AnalyzerMatch> MatchAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default)
     {
         var extension = Path.GetExtension(filePath);
         if (!ExtensionLanguages.ContainsKey(extension))
         {
-            return false;
+            return AnalyzerMatch.No;
         }
 
-        return !string.Equals(extension, ".html", StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(extension, ".htm", StringComparison.OrdinalIgnoreCase) ||
-            IsDocumentationHtmlPath(filePath);
+        if (ClassificationPathMatcher.MatchesAny(workspaceRoot, filePath, _options.Classification.DocumentationPathPatterns))
+        {
+            return AnalyzerMatch.Supported(StrongOverrideConfidence, "documentation_path_override");
+        }
+
+        var isAmbiguous = IsAmbiguousDocumentationExtension(extension);
+        if (!isAmbiguous)
+        {
+            return AnalyzerMatch.Supported(0.8, "documentation_extension");
+        }
+
+        var source = await ReadProbeAsync(filePath, cancellationToken);
+        var confidence = BaselineDocumentationConfidence;
+        var reasons = new List<string> { "ambiguous_extension" };
+
+        if (ClassificationPathMatcher.MatchesAny(workspaceRoot, filePath, _options.Classification.ApplicationMarkupPathPatterns))
+        {
+            confidence -= 0.25;
+            reasons.Add("application_markup_path");
+        }
+
+        if (HtmlHeadingRegex().IsMatch(source) || MarkdownHeadingRegex().IsMatch(source))
+        {
+            confidence += 0.18;
+            reasons.Add("headings");
+        }
+
+        if (DocumentationStructureRegex().IsMatch(source))
+        {
+            confidence += 0.14;
+            reasons.Add("documentation_structure");
+        }
+
+        if (DocumentationGeneratorRegex().IsMatch(source))
+        {
+            confidence += 0.2;
+            reasons.Add("documentation_generator");
+        }
+
+        if (ParagraphRegex().Matches(source).Count >= 2)
+        {
+            confidence += 0.08;
+            reasons.Add("paragraph_density");
+        }
+
+        if (AppMarkupSignalRegex().IsMatch(source))
+        {
+            confidence -= 0.28;
+            reasons.Add("application_markup_signals");
+        }
+
+        return AnalyzerMatch.Supported(confidence, string.Join(",", reasons));
     }
 
     public async Task<IReadOnlyList<CodeChunk>> AnalyzeAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default)
@@ -133,18 +202,25 @@ public sealed partial class DocumentationAnalyzer : ICodeAnalyzer
     private static string StripHtmlTags(string value)
         => HtmlTagRegex().Replace(value, string.Empty);
 
-    private static bool IsDocumentationHtmlPath(string filePath)
-    {
-        var segments = filePath
-            .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
-            .Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+    private static bool IsAmbiguousDocumentationExtension(string extension)
+        => extension.Equals(".html", StringComparison.OrdinalIgnoreCase) ||
+            extension.Equals(".htm", StringComparison.OrdinalIgnoreCase) ||
+            extension.Equals(".mdx", StringComparison.OrdinalIgnoreCase);
 
-        return segments.Any(segment =>
-            segment.Equals("doc", StringComparison.OrdinalIgnoreCase) ||
-            segment.Equals("docs", StringComparison.OrdinalIgnoreCase) ||
-            segment.Equals("documentation", StringComparison.OrdinalIgnoreCase) ||
-            segment.Equals("api-docs", StringComparison.OrdinalIgnoreCase) ||
-            segment.Equals("generated-docs", StringComparison.OrdinalIgnoreCase));
+    private static async Task<string> ReadProbeAsync(string filePath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var stream = File.OpenRead(filePath);
+            using var reader = new StreamReader(stream);
+            var buffer = new char[Math.Min(12_000, (int)Math.Min(stream.Length, int.MaxValue))];
+            var read = await reader.ReadBlockAsync(buffer, cancellationToken);
+            return new string(buffer, 0, read);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return string.Empty;
+        }
     }
 
     private sealed record DocumentationSection(int StartLine, string Title);
@@ -154,6 +230,18 @@ public sealed partial class DocumentationAnalyzer : ICodeAnalyzer
 
     [GeneratedRegex(@"<h[1-6][^>]*>(?<title>.*?)</h[1-6]>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex HtmlHeadingRegex();
+
+    [GeneratedRegex(@"<(?:article|main|section|nav|pre|code)\b|\b(?:table-of-contents|toc|breadcrumbs?)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex DocumentationStructureRegex();
+
+    [GeneratedRegex(@"\b(?:docfx|docusaurus|sphinx|mkdocs|swagger-ui|redoc|asciidoctor|typedoc|storybook-docs)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex DocumentationGeneratorRegex();
+
+    [GeneratedRegex(@"<(?:p|li)\b[^>]*>[^<]{40,}</(?:p|li)>|^[^\r\n<>{}]{80,}$", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    private static partial Regex ParagraphRegex();
+
+    [GeneratedRegex(@"(\*ng(?:If|For)\b|\[(?:[A-Za-z][\w.-]*)\]\s*=|\((?:[A-Za-z][\w.-]*)\)\s*=|\[\(ngModel\)\]|routerLink\b|repeat\.for\b|if\.bind\b|value\.bind\b|click\.delegate\b|\bv-(?:if|for|model)\b|@[A-Za-z][\w.-]*\s*=|:[A-Za-z][\w.-]*\s*=|@(?:page|model|code)\b|\{Binding\b|\bx:Class\s*=)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex AppMarkupSignalRegex();
 
     [GeneratedRegex(@"<[^>]+>", RegexOptions.CultureInvariant)]
     private static partial Regex HtmlTagRegex();

@@ -47,6 +47,7 @@ static async Task<int> RunAsync(IWorkspaceIndexer indexer, string[] args)
                 workspace,
                 GetMany(options, "exclude"),
                 GetBool(options, "force"),
+                GetString(options, "profile") ?? GetString(options, "index-profile"),
                 progress: progress);
             Console.WriteLine(JsonSerializer.Serialize(result, jsonOptions));
             return 0;
@@ -59,6 +60,7 @@ static async Task<int> RunAsync(IWorkspaceIndexer indexer, string[] args)
                 group,
                 GetMany(options, "exclude"),
                 GetBool(options, "force"),
+                GetString(options, "profile") ?? GetString(options, "index-profile"),
                 progress: progress);
             Console.WriteLine(JsonSerializer.Serialize(result, jsonOptions));
             return 0;
@@ -123,6 +125,11 @@ static IReadOnlyList<string>? GetMany(Dictionary<string, List<string>> options, 
         ? values.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray()
         : null;
 
+static string? GetString(Dictionary<string, List<string>> options, string name)
+    => options.TryGetValue(name, out var values) && values.Count > 0 && !string.IsNullOrWhiteSpace(values[^1])
+        ? values[^1]
+        : null;
+
 static bool GetBool(Dictionary<string, List<string>> options, string name)
     => options.ContainsKey(name) &&
         (options[name].Count == 0 || bool.Parse(options[name][^1]));
@@ -136,11 +143,12 @@ static void WriteHelp()
     RagNet Indexer
 
     Commands:
-      index       --workspace <path> [--force] [--exclude <dir-or-relative-path> ...]
-      index-group --group <name>     [--force] [--exclude <dir-or-relative-path> ...]
+      index       --workspace <path> [--force] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
+      index-group --group <name>     [--force] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
       status      --workspace <path>
 
     Options:
+      --profile       Index profile: all, code, docs, metadata, frontend, or tests. Default is all.
       --no-progress   Suppress progress output. Final JSON is always written to stdout.
 
     Examples:

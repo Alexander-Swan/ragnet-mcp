@@ -13,6 +13,8 @@ public sealed class RagNetOptions
     public IReadOnlyList<WorkspaceGroupOptions> WorkspaceGroups { get; init; } = [];
 
     public IndexingOptions Indexing { get; init; } = new();
+
+    public ClassificationOptions Classification { get; init; } = new();
 }
 
 public sealed class OllamaOptions
@@ -68,4 +70,30 @@ public sealed class WorkspaceGroupOptions
 public sealed class IndexingOptions
 {
     public int ChunkMaxChars { get; init; } = 30_000;
+}
+
+public sealed class ClassificationOptions
+{
+    public IReadOnlyList<string> DocumentationPathPatterns { get; init; } =
+    [
+        "**/doc/**",
+        "**/docs/**",
+        "**/documentation/**",
+        "**/api-docs/**",
+        "**/generated-docs/**"
+    ];
+
+    public IReadOnlyList<string> ApplicationMarkupPathPatterns { get; init; } =
+    [
+        "**/src/**",
+        "**/app/**",
+        "**/apps/**",
+        "**/client/**",
+        "**/frontend/**",
+        "**/ui/**",
+        "**/views/**",
+        "**/pages/**",
+        "**/components/**",
+        "**/wwwroot/**"
+    ];
 }

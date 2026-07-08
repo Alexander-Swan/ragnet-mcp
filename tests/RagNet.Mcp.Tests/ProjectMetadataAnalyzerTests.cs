@@ -42,4 +42,72 @@ public sealed class ProjectMetadataAnalyzerTests
         Assert.False(analyzer.CanAnalyze(Path.Combine("repo", "Library.fsproj")));
         Assert.False(analyzer.CanAnalyze(Path.Combine("repo", "Legacy.vbproj")));
     }
+
+    [Fact]
+    public async Task AnalyzeAsync_UsesConservativeChunksForSolutionFiles()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var projects = string.Join(Environment.NewLine, Enumerable.Range(0, 20)
+            .Select(index =>
+                "Project(\"{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}\") = " +
+                $"\"Project{index}\", \"src\\Project{index}\\Project{index}.csproj\", " +
+                $"\"{{11111111-2222-3333-4444-{index:000000000000}}}\""));
+        var file = workspace.WriteFile(
+            "Sample.sln",
+            $$"""
+            Microsoft Visual Studio Solution File, Format Version 12.00
+            # Visual Studio Version 17
+            {{projects}}
+            Global
+            EndGlobal
+            """);
+
+        var analyzer = new ProjectMetadataAnalyzer();
+        var chunks = await analyzer.AnalyzeAsync(workspace.RootPath, file);
+
+        Assert.True(chunks.Count > 1);
+        Assert.All(chunks, chunk =>
+        {
+            Assert.Equal("solution", chunk.Language);
+            Assert.Equal(IndexedContentTypes.ProjectMetadata, chunk.ContentType);
+            Assert.True(chunk.Content.Length <= 700);
+        });
+    }
+
+    [Fact]
+    public async Task AnalyzeAsync_SplitsSingleLongMetadataLines()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var file = workspace.WriteFile(
+            "appsettings.json",
+            $$"""
+            {
+              "LargeKey": "{{new string('x', 1800)}}"
+            }
+            """);
+
+        var analyzer = new ProjectMetadataAnalyzer();
+        var chunks = await analyzer.AnalyzeAsync(workspace.RootPath, file);
+
+        Assert.True(chunks.Count > 1);
+        Assert.All(chunks, chunk => Assert.True(chunk.Content.Length <= 700));
+    }
+
+    [Fact]
+    public async Task AnalyzeAsync_SplitsDenseMetadataByEstimatedTokens()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var file = workspace.WriteFile(
+            ".editorconfig",
+            $"""
+            root = true
+            punctuation = {new string(';', 500)}
+            """);
+
+        var analyzer = new ProjectMetadataAnalyzer();
+        var chunks = await analyzer.AnalyzeAsync(workspace.RootPath, file);
+
+        Assert.True(chunks.Count > 1);
+        Assert.All(chunks, chunk => Assert.True(chunk.Content.Length <= 700));
+    }
 }

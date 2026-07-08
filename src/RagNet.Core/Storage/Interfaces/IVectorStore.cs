@@ -17,5 +17,6 @@ public interface IVectorStore
         int limit,
         bool hybrid,
         string? contentType = null,
+        string? indexProfile = null,
         CancellationToken cancellationToken = default);
 }

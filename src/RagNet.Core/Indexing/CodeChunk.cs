@@ -16,4 +16,14 @@ public sealed record CodeChunk(
     public SourceIdentity? Source { get; init; }
 
     public string ContentType { get; init; } = IndexedContentTypes.Code;
+
+    public string IndexProfile { get; init; } = IndexProfiles.Code;
+
+    public string? FullyQualifiedSymbolName { get; init; }
+
+    public string? Namespace { get; init; }
+
+    public string? TypeContext { get; init; }
+
+    public string? BaseTypes { get; init; }
 }

@@ -13,16 +13,18 @@ public sealed class RagNetTools(IWorkspaceIndexer indexer)
         [Description("A file or directory inside the workspace to index.")] string workspace_path,
         [Description("Additional directory names or workspace-relative directory paths to exclude for this indexing run.")] string[]? exclude_directories = null,
         [Description("When true, clears existing vectors/state for the workspace and reindexes all files.")] bool force = false,
+        [Description("Index profile: all, code, docs, metadata, frontend, or tests. Default is all.")] string? index_profile = null,
         CancellationToken cancellationToken = default)
-        => indexer.IndexAsync(workspace_path, exclude_directories, force, cancellationToken);
+        => indexer.IndexAsync(workspace_path, exclude_directories, force, index_profile, cancellationToken);
 
     [McpServerTool(Name = "index_workspace_group"), Description("Index all configured workspace roots in a named workspace group.")]
     public Task<IReadOnlyList<IndexWorkspaceResult>> IndexWorkspaceGroup(
         [Description("Configured workspace group name from RagNet:WorkspaceGroups.")] string workspace_group,
         [Description("Additional directory names or workspace-relative directory paths to exclude for this indexing run.")] string[]? exclude_directories = null,
         [Description("When true, clears existing vectors/state for each workspace and reindexes all files.")] bool force = false,
+        [Description("Index profile: all, code, docs, metadata, frontend, or tests. Default is all.")] string? index_profile = null,
         CancellationToken cancellationToken = default)
-        => indexer.IndexGroupAsync(workspace_group, exclude_directories, force, cancellationToken);
+        => indexer.IndexGroupAsync(workspace_group, exclude_directories, force, index_profile, cancellationToken);
 
     [McpServerTool(Name = "get_index_status"), Description("Return persisted index metadata for a workspace.")]
     public Task<IndexStatusResult> GetIndexStatus(
@@ -36,11 +38,12 @@ public sealed class RagNetTools(IWorkspaceIndexer indexer)
         [Description("Configured workspace group name from RagNet:WorkspaceGroups. When provided, indexes the whole group.")] string? workspace_group = null,
         [Description("Additional directory names or workspace-relative directory paths to exclude for this indexing run.")] string[]? exclude_directories = null,
         [Description("When true, clears existing vectors/state and reindexes all files.")] bool force = false,
+        [Description("Index profile: all, code, docs, metadata, frontend, or tests. Default is all.")] string? index_profile = null,
         CancellationToken cancellationToken = default)
     {
         if (!string.IsNullOrWhiteSpace(workspace_group))
         {
-            return await indexer.IndexGroupAsync(workspace_group, exclude_directories, force, cancellationToken);
+            return await indexer.IndexGroupAsync(workspace_group, exclude_directories, force, index_profile, cancellationToken);
         }
 
         if (string.IsNullOrWhiteSpace(workspace_path))
@@ -48,7 +51,7 @@ public sealed class RagNetTools(IWorkspaceIndexer indexer)
             throw new ArgumentException("Either workspace_path or workspace_group is required.");
         }
 
-        return [await indexer.IndexAsync(workspace_path, exclude_directories, force, cancellationToken)];
+        return [await indexer.IndexAsync(workspace_path, exclude_directories, force, index_profile, cancellationToken)];
     }
 
     [McpServerTool(Name = "search_code"), Description("Semantic search over indexed product context for the workspace containing file_path.")]
@@ -60,9 +63,10 @@ public sealed class RagNetTools(IWorkspaceIndexer indexer)
         [Description("Configured group name when scope is named_workspace_group.")] string? workspace_group = null,
         [Description("Content filter: code, documentation, markup, project_metadata, or all. Default is all.")] string? content_type = null,
         [Description("Ranking mode: balanced, docs_first, or code_first. Default is balanced.")] string? retrieval_mode = null,
+        [Description("Search profile: all, code, docs, metadata, frontend, or tests. Default is all.")] string? search_profile = null,
         [Description("Maximum number of results to return.")] int limit = 10,
         CancellationToken cancellationToken = default)
-        => indexer.SearchAsync(file_path, query, Math.Clamp(limit, 1, 50), hybrid: false, scope, workspace_root, workspace_group, content_type, retrieval_mode, cancellationToken);
+        => indexer.SearchAsync(file_path, query, Math.Clamp(limit, 1, 50), hybrid: false, scope, workspace_root, workspace_group, content_type, retrieval_mode, search_profile, cancellationToken);
 
     [McpServerTool(Name = "hybrid_search"), Description("Hybrid semantic and keyword search over indexed product context for the workspace containing file_path.")]
     public Task<IReadOnlyList<SearchResult>> HybridSearch(
@@ -73,9 +77,10 @@ public sealed class RagNetTools(IWorkspaceIndexer indexer)
         [Description("Configured group name when scope is named_workspace_group.")] string? workspace_group = null,
         [Description("Content filter: code, documentation, markup, project_metadata, or all. Default is all.")] string? content_type = null,
         [Description("Ranking mode: balanced, docs_first, or code_first. Default is balanced.")] string? retrieval_mode = null,
+        [Description("Search profile: all, code, docs, metadata, frontend, or tests. Default is all.")] string? search_profile = null,
         [Description("Maximum number of results to return.")] int limit = 10,
         CancellationToken cancellationToken = default)
-        => indexer.SearchAsync(file_path, query, Math.Clamp(limit, 1, 50), hybrid: true, scope, workspace_root, workspace_group, content_type, retrieval_mode, cancellationToken);
+        => indexer.SearchAsync(file_path, query, Math.Clamp(limit, 1, 50), hybrid: true, scope, workspace_root, workspace_group, content_type, retrieval_mode, search_profile, cancellationToken);
 
     [McpServerTool(Name = "get_code_context"), Description("Return code lines around a specific file location.")]
     public Task<string> GetCodeContext(

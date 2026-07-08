@@ -6,6 +6,8 @@ namespace RagNet.Mcp.Analyzers.DotNet;
 
 public sealed class ProjectMetadataAnalyzer : ICodeAnalyzer
 {
+    private const int MaxMetadataChunkChars = 700;
+
     private static readonly HashSet<string> ExactMetadataFiles = new(StringComparer.OrdinalIgnoreCase)
     {
         ".editorconfig",
@@ -78,7 +80,8 @@ public sealed class ProjectMetadataAnalyzer : ICodeAnalyzer
             1,
             Math.Max(1, lines.Length),
             content,
-            IndexedContentTypes.ProjectMetadata);
+            IndexedContentTypes.ProjectMetadata,
+            MaxMetadataChunkChars);
     }
 
     private static MetadataProfile GetProfile(string filePath)

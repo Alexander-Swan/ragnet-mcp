@@ -24,4 +24,6 @@ public sealed record IndexTriggerRequest
     public string? WorkspaceGroup { get; init; }
 
     public bool Force { get; init; }
+
+    public string? IndexProfile { get; init; }
 }

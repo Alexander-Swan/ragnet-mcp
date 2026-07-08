@@ -64,6 +64,8 @@ trigger_indexing
 
 Pass `workspace_path` with a file or folder inside the workspace you want indexed. For configured multi-project products, pass `workspace_group` instead. The explicit `index_workspace` and `index_workspace_group` tools are also available.
 
+Use `index_profile` when you want to update a narrower slice: `all`, `code`, `docs`, `metadata`, `frontend`, or `tests`. `all` is the default.
+
 After the first run, indexing is incremental. RagNet stores content-hash file fingerprints plus embedding/index metadata in `.ragnet/state.json` and only reindexes files that changed or removes files that disappeared.
 
 Embeddings and chunk payloads are persisted in Qdrant collections named `{CollectionPrefix}-{workspaceId}`. The default collection prefix is `ragnet`, and the workspace ID is derived from the normalized workspace root.
@@ -80,6 +82,7 @@ You can also run the same indexing pipeline without MCP:
 
 ```powershell
 .\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
+.\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --profile docs
 .\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
 ```
 
@@ -105,7 +108,7 @@ or:
 hybrid_search
 ```
 
-Provide a `file_path` inside the indexed workspace and a query.
+Provide a `file_path` inside the indexed workspace and a query. Use `search_profile` to restrict results to `code`, `docs`, `metadata`, `frontend`, `tests`, or `all`.
 
 ## 6. Configure a Multi-Project Product
 

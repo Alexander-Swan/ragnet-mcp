@@ -33,6 +33,47 @@ public sealed class CSharpAnalyzerTests
     }
 
     [Fact]
+    public async Task AnalyzeAsync_EnrichesChunksWithSyntaxContext()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var file = workspace.WriteFile(
+            "Services/SampleService.cs",
+            """
+            namespace Demo.Services;
+
+            public abstract class BaseService
+            {
+            }
+
+            public sealed class SampleService : BaseService, IDisposable
+            {
+                public void Dispose()
+                {
+                }
+            }
+            """);
+
+        var analyzer = new CSharpAnalyzer();
+        var chunks = await analyzer.AnalyzeAsync(workspace.RootPath, file);
+
+        var typeChunk = Assert.Single(chunks, chunk => chunk.SymbolName == "SampleService");
+        Assert.Equal("Demo.Services.SampleService", typeChunk.FullyQualifiedSymbolName);
+        Assert.Equal("Demo.Services", typeChunk.Namespace);
+        Assert.Null(typeChunk.TypeContext);
+        Assert.Equal("BaseService, IDisposable", typeChunk.BaseTypes);
+        Assert.Contains("Symbol: Demo.Services.SampleService", typeChunk.Content);
+        Assert.Contains("Namespace: Demo.Services", typeChunk.Content);
+        Assert.Contains("Base types: BaseService, IDisposable", typeChunk.Content);
+
+        var methodChunk = Assert.Single(chunks, chunk => chunk.SymbolName == "Dispose");
+        Assert.Equal("Demo.Services.SampleService.Dispose", methodChunk.FullyQualifiedSymbolName);
+        Assert.Equal("Demo.Services", methodChunk.Namespace);
+        Assert.Equal("SampleService", methodChunk.TypeContext);
+        Assert.Null(methodChunk.BaseTypes);
+        Assert.Contains("Type context: SampleService", methodChunk.Content);
+    }
+
+    [Fact]
     public async Task AnalyzeAsync_SplitsOversizedMemberChunks()
     {
         using var workspace = new TemporaryWorkspace();
@@ -59,6 +100,8 @@ public sealed class CSharpAnalyzerTests
 
         Assert.True(methodParts.Length > 1);
         Assert.All(methodParts, chunk => Assert.True(chunk.Content.Length <= 750));
+        Assert.All(methodParts, chunk => Assert.Equal("LargeMethod.Run", chunk.FullyQualifiedSymbolName));
+        Assert.All(methodParts, chunk => Assert.Equal("LargeMethod", chunk.TypeContext));
     }
 
     private sealed class TemporaryWorkspace : IDisposable

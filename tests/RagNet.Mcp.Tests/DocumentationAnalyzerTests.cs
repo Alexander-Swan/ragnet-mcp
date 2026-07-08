@@ -1,4 +1,5 @@
 using RagNet.Mcp.Analyzers.Documentation;
+using RagNet.Mcp.Analyzers.Markup;
 using RagNet.Mcp.Indexing;
 
 namespace RagNet.Mcp.Tests;
@@ -60,15 +61,37 @@ public sealed class DocumentationAnalyzerTests
     }
 
     [Fact]
-    public void CanAnalyze_TreatsOnlyDocPathHtmlAsDocumentation()
+    public async Task MatchAsync_ScoresAmbiguousHtmlFromContentAndPath()
     {
         using var workspace = new TemporaryWorkspace();
-        var docHtml = workspace.WriteFile("docs/reference/index.html", "<h1>Reference</h1>");
-        var appHtml = workspace.WriteFile("src/app/user-view.html", "<section>User view</section>");
+        var docHtml = workspace.WriteFile(
+            "docs/reference/index.html",
+            """
+            <article>
+                <h1>Reference</h1>
+                <p>This page explains how to configure the public API and includes enough prose to look like documentation.</p>
+            </article>
+            """);
+        var appHtml = workspace.WriteFile(
+            "src/app/user-view.html",
+            """
+            <section *ngIf="user">
+                <button (click)="save()" [disabled]="saving">Save</button>
+            </section>
+            """);
 
-        var analyzer = new DocumentationAnalyzer();
+        var documentationAnalyzer = new DocumentationAnalyzer();
+        var markupAnalyzer = new MarkupAnalyzer();
 
-        Assert.True(analyzer.CanAnalyze(docHtml));
-        Assert.False(analyzer.CanAnalyze(appHtml));
+        Assert.True(documentationAnalyzer.CanAnalyze(docHtml));
+        Assert.True(documentationAnalyzer.CanAnalyze(appHtml));
+
+        var docHtmlMatch = await documentationAnalyzer.MatchAsync(workspace.RootPath, docHtml);
+        var docHtmlMarkupMatch = await markupAnalyzer.MatchAsync(workspace.RootPath, docHtml);
+        var appHtmlDocMatch = await documentationAnalyzer.MatchAsync(workspace.RootPath, appHtml);
+        var appHtmlMarkupMatch = await markupAnalyzer.MatchAsync(workspace.RootPath, appHtml);
+
+        Assert.True(docHtmlMatch.Confidence > docHtmlMarkupMatch.Confidence);
+        Assert.True(appHtmlMarkupMatch.Confidence > appHtmlDocMatch.Confidence);
     }
 }

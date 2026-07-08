@@ -1,4 +1,7 @@
+using Microsoft.Extensions.Options;
 using RagNet.Mcp.Analyzers.Markup;
+using RagNet.Mcp.Analyzers.Documentation;
+using RagNet.Mcp.Configuration;
 using RagNet.Mcp.Indexing;
 
 namespace RagNet.Mcp.Tests;
@@ -83,6 +86,71 @@ public sealed class MarkupAnalyzerTests
         Assert.Contains(xamlChunks, chunk => chunk.SymbolName == "Button#SaveButton" && chunk.SymbolKind == "BoundElement");
         Assert.Contains(cssChunks, chunk => chunk.SymbolName == ".toolbar button" && chunk.SymbolKind == "StyleRule");
         Assert.Contains(cssChunks, chunk => chunk.SymbolName.StartsWith("@media", StringComparison.Ordinal) && chunk.SymbolKind == "StyleAtRule");
+    }
+
+    [Fact]
+    public async Task MatchAsync_ScoresMdxWithReactComponentsAsMarkup()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var file = workspace.WriteFile(
+            "src/components/Usage.mdx",
+            """
+            import { Alert } from './Alert';
+
+            # Usage
+
+            <Alert variant="warning" />
+            <DemoPanel title="Options" />
+            """);
+
+        var markupAnalyzer = new MarkupAnalyzer();
+        var documentationAnalyzer = new DocumentationAnalyzer();
+
+        var markupMatch = await markupAnalyzer.MatchAsync(workspace.RootPath, file);
+        var documentationMatch = await documentationAnalyzer.MatchAsync(workspace.RootPath, file);
+
+        Assert.True(markupAnalyzer.CanAnalyze(file));
+        Assert.True(markupMatch.Confidence > documentationMatch.Confidence);
+    }
+
+    [Fact]
+    public async Task MatchAsync_UsesConfiguredPathOverridesForAmbiguousExtensions()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var docFile = workspace.WriteFile(
+            "knowledge-base/page.html",
+            """
+            <section *ngIf="ready">
+                <h1>Internal Cookbook</h1>
+            </section>
+            """);
+        var appFile = workspace.WriteFile(
+            "docs/live-templates/widget.html",
+            """
+            <article>
+                <h1>Widget</h1>
+                <p>This mostly looks like documentation unless the configured path says it is application markup.</p>
+            </article>
+            """);
+        var options = Options.Create(new RagNetOptions
+        {
+            Classification = new ClassificationOptions
+            {
+                DocumentationPathPatterns = ["**/knowledge-base/**"],
+                ApplicationMarkupPathPatterns = ["**/docs/live-templates/**"]
+            }
+        });
+
+        var markupAnalyzer = new MarkupAnalyzer(options);
+        var documentationAnalyzer = new DocumentationAnalyzer(options);
+
+        var docFileMarkupMatch = await markupAnalyzer.MatchAsync(workspace.RootPath, docFile);
+        var docFileDocumentationMatch = await documentationAnalyzer.MatchAsync(workspace.RootPath, docFile);
+        var appFileMarkupMatch = await markupAnalyzer.MatchAsync(workspace.RootPath, appFile);
+        var appFileDocumentationMatch = await documentationAnalyzer.MatchAsync(workspace.RootPath, appFile);
+
+        Assert.True(docFileDocumentationMatch.Confidence > docFileMarkupMatch.Confidence);
+        Assert.True(appFileMarkupMatch.Confidence > appFileDocumentationMatch.Confidence);
     }
 
     private sealed class TemporaryWorkspace : IDisposable

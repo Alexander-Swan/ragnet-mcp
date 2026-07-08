@@ -11,5 +11,7 @@ public sealed record SearchResult(
 {
     public string ContentType { get; init; } = IndexedContentTypes.Code;
 
+    public string IndexProfile { get; init; } = IndexProfiles.Code;
+
     public string Language { get; init; } = string.Empty;
 }

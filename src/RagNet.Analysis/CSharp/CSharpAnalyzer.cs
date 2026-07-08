@@ -55,9 +55,11 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
         var span = member.GetLocation().GetLineSpan();
         var startLine = span.StartLinePosition.Line + 1;
         var endLine = span.EndLinePosition.Line + 1;
+        var metadata = CreateMetadata(member, symbolName);
         var content = member is BaseTypeDeclarationSyntax type
             ? CreateTypeSummary(type)
             : member.ToFullString();
+        content = AddMetadataHeader(content, metadata);
         var id = $"{Path.GetRelativePath(workspaceRoot, filePath)}:{startLine}:{endLine}:{symbolName}";
 
         return SplitChunk(
@@ -68,7 +70,73 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
             member is BaseTypeDeclarationSyntax ? $"{member.Kind()}Summary" : member.Kind().ToString(),
             startLine,
             endLine,
-            content);
+            content,
+            metadata);
+    }
+
+    private static CSharpChunkMetadata CreateMetadata(MemberDeclarationSyntax member, string symbolName)
+    {
+        var namespaceName = GetNamespace(member);
+        var containingTypes = member.Ancestors()
+            .OfType<BaseTypeDeclarationSyntax>()
+            .Reverse()
+            .Select(type => type.Identifier.ValueText)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToArray();
+        var typeContext = string.Join(".", containingTypes);
+        var fullNameParts = new[] { namespaceName, typeContext, symbolName }
+            .Where(part => !string.IsNullOrWhiteSpace(part));
+        var baseTypes = member is BaseTypeDeclarationSyntax type && type.BaseList is not null
+            ? string.Join(", ", type.BaseList.Types.Select(baseType => baseType.Type.ToString()))
+            : null;
+
+        return new CSharpChunkMetadata(
+            string.Join(".", fullNameParts),
+            string.IsNullOrWhiteSpace(namespaceName) ? null : namespaceName,
+            string.IsNullOrWhiteSpace(typeContext) ? null : typeContext,
+            string.IsNullOrWhiteSpace(baseTypes) ? null : baseTypes);
+    }
+
+    private static string? GetNamespace(SyntaxNode node)
+    {
+        var namespaceParts = node.Ancestors()
+            .OfType<BaseNamespaceDeclarationSyntax>()
+            .Reverse()
+            .Select(namespaceDeclaration => namespaceDeclaration.Name.ToString())
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToArray();
+
+        if (namespaceParts.Length > 0)
+        {
+            return string.Join(".", namespaceParts);
+        }
+
+        return null;
+    }
+
+    private static string AddMetadataHeader(string content, CSharpChunkMetadata metadata)
+    {
+        var lines = new List<string>
+        {
+            $"Symbol: {metadata.FullyQualifiedSymbolName}"
+        };
+
+        if (metadata.Namespace is not null)
+        {
+            lines.Add($"Namespace: {metadata.Namespace}");
+        }
+
+        if (metadata.TypeContext is not null)
+        {
+            lines.Add($"Type context: {metadata.TypeContext}");
+        }
+
+        if (metadata.BaseTypes is not null)
+        {
+            lines.Add($"Base types: {metadata.BaseTypes}");
+        }
+
+        return $"{string.Join(Environment.NewLine, lines)}{Environment.NewLine}{Environment.NewLine}{content}";
     }
 
     private static string GetSymbolName(MemberDeclarationSyntax member)
@@ -156,7 +224,8 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
         string symbolKind,
         int startLine,
         int endLine,
-        string content)
+        string content,
+        CSharpChunkMetadata? metadata = null)
     {
         if (content.Length <= MaxChunkChars)
         {
@@ -172,6 +241,12 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
                     startLine,
                     endLine,
                     content)
+                {
+                    FullyQualifiedSymbolName = metadata?.FullyQualifiedSymbolName,
+                    Namespace = metadata?.Namespace,
+                    TypeContext = metadata?.TypeContext,
+                    BaseTypes = metadata?.BaseTypes
+                }
             ];
         }
 
@@ -188,7 +263,7 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
             var lineLength = line.Length + Environment.NewLine.Length;
             if (partLines.Count > 0 && currentLength + lineLength > MaxChunkChars)
             {
-                chunks.Add(CreatePart(workspaceRoot, filePath, id, symbolName, symbolKind, partStartLine, partStartLine + partLines.Count - 1, part, partLines));
+                chunks.Add(CreatePart(workspaceRoot, filePath, id, symbolName, symbolKind, partStartLine, partStartLine + partLines.Count - 1, part, partLines, metadata));
                 part++;
                 partLines.Clear();
                 currentLength = 0;
@@ -201,7 +276,7 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
 
         if (partLines.Count > 0)
         {
-            chunks.Add(CreatePart(workspaceRoot, filePath, id, symbolName, symbolKind, partStartLine, partStartLine + partLines.Count - 1, part, partLines));
+            chunks.Add(CreatePart(workspaceRoot, filePath, id, symbolName, symbolKind, partStartLine, partStartLine + partLines.Count - 1, part, partLines, metadata));
         }
 
         return chunks;
@@ -216,7 +291,8 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
         int startLine,
         int endLine,
         int part,
-        IReadOnlyList<string> lines)
+        IReadOnlyList<string> lines,
+        CSharpChunkMetadata? metadata = null)
         => new(
             $"{id}:part:{part}",
             workspaceRoot,
@@ -226,5 +302,17 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
             $"{symbolKind}Part",
             startLine,
             endLine,
-            string.Join(Environment.NewLine, lines));
+            string.Join(Environment.NewLine, lines))
+        {
+            FullyQualifiedSymbolName = metadata?.FullyQualifiedSymbolName,
+            Namespace = metadata?.Namespace,
+            TypeContext = metadata?.TypeContext,
+            BaseTypes = metadata?.BaseTypes
+        };
+
+    private sealed record CSharpChunkMetadata(
+        string FullyQualifiedSymbolName,
+        string? Namespace,
+        string? TypeContext,
+        string? BaseTypes);
 }

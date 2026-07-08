@@ -1,12 +1,20 @@
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Options;
+using RagNet.Mcp.Analyzers;
+using RagNet.Mcp.Analyzers.Common;
 using RagNet.Mcp.Analyzers.Interfaces;
+using RagNet.Mcp.Configuration;
 using RagNet.Mcp.Indexing;
 
 namespace RagNet.Mcp.Analyzers.Markup;
 
-public sealed partial class MarkupAnalyzer : ICodeAnalyzer
+public sealed partial class MarkupAnalyzer : IContentAwareAnalyzer
 {
     private const int MaxChunkChars = 750;
+    private const double StrongOverrideConfidence = 0.95;
+    private const double BaselineMarkupConfidence = 0.5;
+
+    private readonly RagNetOptions _options;
 
     private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -18,13 +26,80 @@ public sealed partial class MarkupAnalyzer : ICodeAnalyzer
         ".master",
         ".xaml",
         ".html",
+        ".htm",
+        ".mdx",
         ".css",
         ".scss",
         ".sass",
         ".less"
     };
 
+    public MarkupAnalyzer()
+        : this(null)
+    {
+    }
+
+    public MarkupAnalyzer(IOptions<RagNetOptions>? options)
+    {
+        _options = options?.Value ?? new RagNetOptions();
+    }
+
     public bool CanAnalyze(string filePath) => Extensions.Contains(Path.GetExtension(filePath));
+
+    public async Task<AnalyzerMatch> MatchAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default)
+    {
+        var extension = Path.GetExtension(filePath);
+        if (!Extensions.Contains(extension))
+        {
+            return AnalyzerMatch.No;
+        }
+
+        if (ClassificationPathMatcher.MatchesAny(workspaceRoot, filePath, _options.Classification.ApplicationMarkupPathPatterns))
+        {
+            return AnalyzerMatch.Supported(StrongOverrideConfidence, "application_markup_path_override");
+        }
+
+        if (!IsAmbiguousMarkupExtension(extension))
+        {
+            return AnalyzerMatch.Supported(0.85, "markup_extension");
+        }
+
+        var source = await ReadProbeAsync(filePath, cancellationToken);
+        var confidence = BaselineMarkupConfidence;
+        var reasons = new List<string> { "ambiguous_extension" };
+
+        if (ClassificationPathMatcher.MatchesAny(workspaceRoot, filePath, _options.Classification.DocumentationPathPatterns))
+        {
+            confidence -= 0.25;
+            reasons.Add("documentation_path");
+        }
+
+        if (ApplicationFrameworkSignalRegex().IsMatch(source))
+        {
+            confidence += 0.35;
+            reasons.Add("application_framework_signals");
+        }
+
+        if (BindingOrEventRegex().IsMatch(source))
+        {
+            confidence += 0.18;
+            reasons.Add("bindings_or_events");
+        }
+
+        if (ComponentUsageRegex().Matches(source).Count >= 2)
+        {
+            confidence += 0.12;
+            reasons.Add("component_usage");
+        }
+
+        if (DocumentationSignalRegex().IsMatch(source))
+        {
+            confidence -= 0.22;
+            reasons.Add("documentation_signals");
+        }
+
+        return AnalyzerMatch.Supported(confidence, string.Join(",", reasons));
+    }
 
     public async Task<IReadOnlyList<CodeChunk>> AnalyzeAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default)
     {
@@ -333,9 +408,31 @@ public sealed partial class MarkupAnalyzer : ICodeAnalyzer
             ".cshtml" or ".vbhtml" => "razor",
             ".aspx" or ".ascx" or ".master" => "aspnet",
             ".xaml" => "xaml",
+            ".mdx" => "mdx",
             ".css" or ".scss" or ".sass" or ".less" => "css",
             _ => "html"
         };
+
+    private static bool IsAmbiguousMarkupExtension(string extension)
+        => extension.Equals(".html", StringComparison.OrdinalIgnoreCase) ||
+            extension.Equals(".htm", StringComparison.OrdinalIgnoreCase) ||
+            extension.Equals(".mdx", StringComparison.OrdinalIgnoreCase);
+
+    private static async Task<string> ReadProbeAsync(string filePath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var stream = File.OpenRead(filePath);
+            using var reader = new StreamReader(stream);
+            var buffer = new char[Math.Min(12_000, (int)Math.Min(stream.Length, int.MaxValue))];
+            var read = await reader.ReadBlockAsync(buffer, cancellationToken);
+            return new string(buffer, 0, read);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return string.Empty;
+        }
+    }
 
     private static HashSet<string> VoidTags()
         => new(StringComparer.OrdinalIgnoreCase)
@@ -379,6 +476,15 @@ public sealed partial class MarkupAnalyzer : ICodeAnalyzer
 
     [GeneratedRegex(@"(@bind|@on\w+|on\w+\s*=|\b(?:Click|Command|ItemsSource|DataContext|Text|Value|SelectedItem)\s*=|\{Binding\b|asp-for\s*=|asp-action\s*=|asp-controller\s*=)", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
     private static partial Regex BindingOrEventRegex();
+
+    [GeneratedRegex(@"(\*ng(?:If|For)\b|\[(?:[A-Za-z][\w.-]*)\]\s*=|\((?:[A-Za-z][\w.-]*)\)\s*=|\[\(ngModel\)\]|routerLink\b|repeat\.for\b|if\.bind\b|value\.bind\b|click\.delegate\b|\bv-(?:if|for|model)\b|@[A-Za-z][\w.-]*\s*=|:[A-Za-z][\w.-]*\s*=|@(?:page|model|code)\b|\{Binding\b|\bx:Class\s*=|asp-(?:for|action|controller)\s*=)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ApplicationFrameworkSignalRegex();
+
+    [GeneratedRegex(@"<([A-Z][A-Za-z0-9.]*|[a-z]+-[a-z0-9-]+)\b", RegexOptions.CultureInvariant)]
+    private static partial Regex ComponentUsageRegex();
+
+    [GeneratedRegex(@"<(?:article|main|nav|pre|code)\b|\b(?:docfx|docusaurus|sphinx|mkdocs|swagger-ui|redoc|table-of-contents|toc)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex DocumentationSignalRegex();
 
     [GeneratedRegex(@"^\s*(?<selector>(?:@[\w-]+[^{]+|[^{}]+))\s*\{", RegexOptions.CultureInvariant)]
     private static partial Regex CssSelectorRegex();

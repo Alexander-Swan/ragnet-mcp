@@ -56,6 +56,7 @@ public sealed class InMemoryIndexingJobQueue(
                     request.WorkspaceGroup,
                     excludeDirectories: null,
                     request.Force,
+                    request.IndexProfile,
                     cancellationToken);
             }
             else
@@ -64,6 +65,7 @@ public sealed class InMemoryIndexingJobQueue(
                     request.WorkspacePath!,
                     excludeDirectories: null,
                     request.Force,
+                    request.IndexProfile,
                     cancellationToken);
                 results = [result];
             }

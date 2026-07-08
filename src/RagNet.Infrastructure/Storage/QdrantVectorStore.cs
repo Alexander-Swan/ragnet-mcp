@@ -118,6 +118,7 @@ public sealed class QdrantVectorStore(
         int limit,
         bool hybrid,
         string? contentType = null,
+        string? indexProfile = null,
         CancellationToken cancellationToken = default)
     {
         if (embedding.Length == 0)
@@ -132,7 +133,7 @@ public sealed class QdrantVectorStore(
         }
 
         var candidateLimit = Math.Max(1, limit) * (hybrid ? HybridCandidateMultiplier : 1);
-        var filter = CreateSearchFilter(workspaceRoot, contentType);
+        var filter = CreateSearchFilter(workspaceRoot, contentType, indexProfile);
         var response = await _httpClient.PostAsJsonAsync(
             $"collections/{Uri.EscapeDataString(collectionName)}/points/query",
             new
@@ -260,6 +261,7 @@ public sealed class QdrantVectorStore(
             is_git_repository = chunk.Source?.IsGitRepository ?? false,
             file_path = NormalizePath(chunk.FilePath),
             content_type = chunk.ContentType,
+            index_profile = chunk.IndexProfile,
             language = chunk.Language,
             symbol_name = chunk.SymbolName,
             symbol_kind = chunk.SymbolKind,
@@ -280,6 +282,7 @@ public sealed class QdrantVectorStore(
         var content = GetString(payload, "content");
         var keywordScore = hybrid ? KeywordScore(content, tokens) : 0d;
 
+        var indexProfile = GetString(payload, "index_profile");
         return new SearchResult(
             GetString(payload, "file_path"),
             GetString(payload, "symbol_name"),
@@ -290,6 +293,7 @@ public sealed class QdrantVectorStore(
             GetString(payload, "preview"))
         {
             ContentType = GetString(payload, "content_type"),
+            IndexProfile = string.IsNullOrWhiteSpace(indexProfile) ? IndexProfiles.Code : indexProfile,
             Language = GetString(payload, "language")
         };
     }
@@ -314,7 +318,7 @@ public sealed class QdrantVectorStore(
             }
         };
 
-    private static object CreateSearchFilter(string workspaceRoot, string? contentType)
+    private static object CreateSearchFilter(string workspaceRoot, string? contentType, string? indexProfile)
     {
         var must = new List<object>
         {
@@ -325,6 +329,12 @@ public sealed class QdrantVectorStore(
         if (normalizedContentType is not null)
         {
             must.Add(MatchKeyword("content_type", normalizedContentType));
+        }
+
+        var normalizedIndexProfile = NormalizeIndexProfile(indexProfile);
+        if (normalizedIndexProfile is not null)
+        {
+            must.Add(MatchKeyword("index_profile", normalizedIndexProfile));
         }
 
         return new { must };
@@ -340,6 +350,9 @@ public sealed class QdrantVectorStore(
 
         return contentType.Trim();
     }
+
+    private static string? NormalizeIndexProfile(string? indexProfile)
+        => IndexProfiles.NormalizeFilter(indexProfile);
 
     private static string CreatePointId(string workspaceId, string chunkId)
     {

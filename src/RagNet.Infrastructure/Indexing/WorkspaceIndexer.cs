@@ -2,6 +2,7 @@ using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
+using RagNet.Mcp.Analyzers;
 using RagNet.Mcp.Analyzers.Interfaces;
 using RagNet.Mcp.Configuration;
 using RagNet.Mcp.Embeddings.Interfaces;
@@ -25,7 +26,8 @@ public sealed class WorkspaceIndexer(
     ISourceIdentityResolver sourceIdentityResolver,
     IOptions<RagNetOptions> options) : IWorkspaceIndexer
 {
-    private const string IndexSchemaVersion = "ragnet-index-v2/analyzers-v5";
+    private const string IndexSchemaVersion = "ragnet-index-v2/analyzers-v8";
+    private const int SearchCandidateMultiplier = 5;
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> IndexLocks = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly IReadOnlyList<ICodeAnalyzer> _analyzers = analyzers.ToArray();
@@ -35,9 +37,11 @@ public sealed class WorkspaceIndexer(
         string workspacePath,
         IReadOnlyList<string>? excludeDirectories = null,
         bool force = false,
+        string? indexProfile = null,
         CancellationToken cancellationToken = default,
         IProgress<IndexingProgress>? progress = null)
     {
+        var normalizedIndexProfile = IndexProfiles.Normalize(indexProfile);
         var workspace = await workspaceDetector.DetectAsync(workspacePath, cancellationToken);
         EnsureAllowedWorkspaceRoot(workspace.RootPath);
         var workspaceRoot = NormalizePath(workspace.RootPath);
@@ -47,7 +51,7 @@ public sealed class WorkspaceIndexer(
 
         try
         {
-            return await IndexLockedAsync(workspaceRoot, excludeDirectories, force, cancellationToken, progress);
+            return await IndexLockedAsync(workspaceRoot, excludeDirectories, force, normalizedIndexProfile, cancellationToken, progress);
         }
         finally
         {
@@ -59,17 +63,21 @@ public sealed class WorkspaceIndexer(
         string workspaceRoot,
         IReadOnlyList<string>? excludeDirectories,
         bool force,
+        string indexProfile,
         CancellationToken cancellationToken,
         IProgress<IndexingProgress>? progress)
     {
         var warnings = new List<string>();
         var files = EnumerateFiles(workspaceRoot, excludeDirectories).ToArray();
+        var profileFiles = files
+            .Where(file => FileMatchesProfile(file, indexProfile))
+            .ToArray();
         var currentFiles = new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase);
         var scanned = 0;
 
-        Report(progress, workspaceRoot, IndexingProgressStage.ScanningFiles, 0, files.Length, "Scanning files.");
+        Report(progress, workspaceRoot, IndexingProgressStage.ScanningFiles, 0, profileFiles.Length, "Scanning files.");
 
-        foreach (var file in files)
+        foreach (var file in profileFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -84,35 +92,43 @@ public sealed class WorkspaceIndexer(
             }
 
             scanned++;
-            Report(progress, workspaceRoot, IndexingProgressStage.ScanningFiles, scanned, files.Length, "Scanning files.");
+            Report(progress, workspaceRoot, IndexingProgressStage.ScanningFiles, scanned, profileFiles.Length, "Scanning files.");
         }
 
         Report(progress, workspaceRoot, IndexingProgressStage.ComparingState, 0, null, "Comparing with previous index state.");
         var previousState = await indexStateStore.LoadAsync(workspaceRoot, cancellationToken);
         var stateCompatible = IsStateCompatible(previousState);
+        var profileScoped = indexProfile != IndexProfiles.All;
         var fullReindex = force || !stateCompatible;
         if (force)
         {
-            warnings.Add("Forced full reindex requested.");
+            warnings.Add(profileScoped
+                ? $"Forced reindex requested for profile '{indexProfile}'."
+                : "Forced full reindex requested.");
         }
         else if (!stateCompatible)
         {
             warnings.Add("Index state metadata changed or was missing; full reindex required.");
         }
 
-        if (fullReindex)
+        if (fullReindex && !profileScoped)
         {
             await vectorStore.DeleteWorkspaceAsync(workspaceRoot, cancellationToken);
             previousState = EmptyState(workspaceRoot);
         }
+        else if (!stateCompatible)
+        {
+            throw new InvalidOperationException("Profile-scoped indexing requires a compatible existing index state. Run an all-profile reindex first.");
+        }
 
         var changedFiles = currentFiles.Values
-            .Where(file => !previousState.Files.TryGetValue(file.FilePath, out var previous) ||
+            .Where(file => force ||
+                !previousState.Files.TryGetValue(file.FilePath, out var previous) ||
                 !string.Equals(previous.Fingerprint, file.Fingerprint, StringComparison.Ordinal))
             .Select(file => file.FilePath)
             .ToArray();
         var deletedFiles = previousState.Files.Keys
-            .Where(file => !currentFiles.ContainsKey(file))
+            .Where(file => FileMatchesProfile(file, indexProfile) && !currentFiles.ContainsKey(file))
             .ToArray();
         var chunks = new List<CodeChunk>();
         var workspaceSourceIdentity = await sourceIdentityResolver.ResolveAsync(workspaceRoot, workspaceRoot, cancellationToken);
@@ -133,7 +149,7 @@ public sealed class WorkspaceIndexer(
         foreach (var file in changedFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var analyzer = _analyzers.FirstOrDefault(candidate => candidate.CanAnalyze(file));
+            var analyzer = await SelectAnalyzerAsync(workspaceRoot, file, cancellationToken);
             if (analyzer is null)
             {
                 analyzed++;
@@ -144,7 +160,11 @@ public sealed class WorkspaceIndexer(
             try
             {
                 chunks.AddRange((await analyzer.AnalyzeAsync(workspaceRoot, file, cancellationToken))
-                    .Select(chunk => chunk with { Source = workspaceSourceIdentity.ForFile(chunk.FilePath) }));
+                    .Select(chunk => chunk with
+                    {
+                        Source = workspaceSourceIdentity.ForFile(chunk.FilePath),
+                        IndexProfile = GetIndexProfile(chunk.FilePath, chunk.ContentType)
+                    }));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -188,22 +208,31 @@ public sealed class WorkspaceIndexer(
         }
 
         Report(progress, workspaceRoot, IndexingProgressStage.SavingState, 0, null, "Saving index state.");
+        var filesToSave = profileScoped
+            ? previousState.Files
+                .Where(file => !FileMatchesProfile(file.Key, indexProfile))
+                .Select(file => file.Value)
+                .Concat(currentFiles.Values)
+                .ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
+            : currentFiles;
+
         await indexStateStore.SaveAsync(new WorkspaceIndexState(
             workspaceRoot,
-            currentFiles,
+            filesToSave,
             _options.Ollama.EmbeddingModel,
             IndexSchemaVersion,
             DateTimeOffset.UtcNow,
             StateExists: true), cancellationToken);
         indexedWorkspaceRegistry.MarkIndexed(workspaceRoot);
         Report(progress, workspaceRoot, IndexingProgressStage.Completed, embeddedChunks.Count, chunks.Count, "Indexing completed.");
-        return new IndexWorkspaceResult(workspaceRoot, files.Length, embeddedChunks.Count, fullReindex, warnings);
+        return new IndexWorkspaceResult(workspaceRoot, profileFiles.Length, embeddedChunks.Count, fullReindex, warnings);
     }
 
     public async Task<IReadOnlyList<IndexWorkspaceResult>> IndexGroupAsync(
         string workspaceGroup,
         IReadOnlyList<string>? excludeDirectories = null,
         bool force = false,
+        string? indexProfile = null,
         CancellationToken cancellationToken = default,
         IProgress<IndexingProgress>? progress = null)
     {
@@ -219,7 +248,7 @@ public sealed class WorkspaceIndexer(
         foreach (var workspace in workspaces)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            results.Add(await IndexAsync(workspace.RootPath, groupExcludes, force, cancellationToken, progress));
+            results.Add(await IndexAsync(workspace.RootPath, groupExcludes, force, indexProfile, cancellationToken, progress));
         }
 
         return results;
@@ -262,6 +291,7 @@ public sealed class WorkspaceIndexer(
         string? workspaceGroup,
         string? contentType = null,
         string? retrievalMode = null,
+        string? searchProfile = null,
         CancellationToken cancellationToken = default)
     {
         var embedding = await embeddingProvider.EmbedAsync(query, cancellationToken);
@@ -274,6 +304,8 @@ public sealed class WorkspaceIndexer(
         var results = new List<SearchResult>();
         var normalizedContentType = NormalizeContentType(contentType);
         var normalizedRetrievalMode = NormalizeRetrievalMode(retrievalMode);
+        var normalizedSearchProfile = NormalizeSearchProfile(searchProfile);
+        var candidateLimit = Math.Min(50, Math.Max(Math.Max(1, limit), Math.Max(1, limit) * SearchCandidateMultiplier));
 
         foreach (var workspace in workspaces)
         {
@@ -282,17 +314,20 @@ public sealed class WorkspaceIndexer(
                 workspace.RootPath,
                 embedding,
                 query,
-                limit,
+                candidateLimit,
                 hybrid,
                 normalizedContentType,
+                normalizedSearchProfile == IndexProfiles.All ? null : normalizedSearchProfile,
                 cancellationToken));
         }
 
-        return results
+        var reranked = results
+            .Where(result => MatchesSearchProfile(result, normalizedSearchProfile))
             .Select(result => ApplyRetrievalModeBoost(result, normalizedRetrievalMode))
             .OrderByDescending(result => result.Score)
-            .Take(Math.Max(1, limit))
             .ToArray();
+
+        return SearchResultPacker.Pack(reranked, limit);
     }
 
     public async Task<string> GetCodeContextAsync(string filePath, int line, int before, int after, CancellationToken cancellationToken = default)
@@ -312,13 +347,14 @@ public sealed class WorkspaceIndexer(
         var workspace = await workspaceDetector.DetectAsync(filePath, cancellationToken);
         EnsureAllowedWorkspaceRoot(workspace.RootPath);
         EnsureAllowedPath(filePath);
-        var analyzer = _analyzers.FirstOrDefault(candidate => candidate.CanAnalyze(filePath));
+        var fullPath = Path.GetFullPath(filePath);
+        var analyzer = await SelectAnalyzerAsync(workspace.RootPath, fullPath, cancellationToken);
         if (analyzer is null)
         {
             return null;
         }
 
-        var chunks = await analyzer.AnalyzeAsync(workspace.RootPath, Path.GetFullPath(filePath), cancellationToken);
+        var chunks = await analyzer.AnalyzeAsync(workspace.RootPath, fullPath, cancellationToken);
         return chunks.FirstOrDefault(chunk => string.Equals(chunk.SymbolName, symbolName, StringComparison.OrdinalIgnoreCase))?.Content;
     }
 
@@ -361,6 +397,37 @@ public sealed class WorkspaceIndexer(
                 }
             }
         }
+    }
+
+    private async Task<ICodeAnalyzer?> SelectAnalyzerAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken)
+    {
+        ICodeAnalyzer? selected = null;
+        AnalyzerMatch selectedMatch = AnalyzerMatch.No;
+
+        foreach (var analyzer in _analyzers)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var match = analyzer switch
+            {
+                IContentAwareAnalyzer contentAware => await contentAware.MatchAsync(workspaceRoot, filePath, cancellationToken),
+                _ when analyzer.CanAnalyze(filePath) => AnalyzerMatch.Supported(),
+                _ => AnalyzerMatch.No
+            };
+
+            if (!match.CanAnalyze)
+            {
+                continue;
+            }
+
+            if (selected is null || match.Confidence > selectedMatch.Confidence)
+            {
+                selected = analyzer;
+                selectedMatch = match;
+            }
+        }
+
+        return selected;
     }
 
     private IReadOnlyList<string> GetWorkspaceGroupExcludes(string workspaceGroup, IReadOnlyList<string>? excludeDirectories)
@@ -517,6 +584,159 @@ public sealed class WorkspaceIndexer(
         };
 
         return multiplier == 1d ? result : result with { Score = result.Score * multiplier };
+    }
+
+    private static string NormalizeSearchProfile(string? searchProfile)
+    {
+        if (string.IsNullOrWhiteSpace(searchProfile))
+        {
+            return IndexProfiles.All;
+        }
+
+        var normalized = IndexProfiles.Normalize(searchProfile);
+        return normalized switch
+        {
+            IndexProfiles.All => IndexProfiles.All,
+            IndexProfiles.Code => IndexProfiles.Code,
+            IndexProfiles.Documentation => IndexProfiles.Documentation,
+            IndexProfiles.Metadata => IndexProfiles.Metadata,
+            IndexProfiles.Frontend => IndexProfiles.Frontend,
+            IndexProfiles.Tests => IndexProfiles.Tests,
+            _ => throw new ArgumentException(
+                $"Unsupported search_profile '{searchProfile}'. Use all, code, docs, metadata, frontend, or tests.",
+                nameof(searchProfile))
+        };
+    }
+
+    private static bool MatchesSearchProfile(SearchResult result, string searchProfile)
+        => searchProfile switch
+        {
+            IndexProfiles.All => true,
+            IndexProfiles.Code => string.Equals(result.IndexProfile, IndexProfiles.Code, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(result.ContentType, IndexedContentTypes.Code, StringComparison.OrdinalIgnoreCase),
+            IndexProfiles.Documentation => string.Equals(result.IndexProfile, IndexProfiles.Documentation, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(result.ContentType, IndexedContentTypes.Documentation, StringComparison.OrdinalIgnoreCase),
+            IndexProfiles.Metadata => string.Equals(result.IndexProfile, IndexProfiles.Metadata, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(result.ContentType, IndexedContentTypes.ProjectMetadata, StringComparison.OrdinalIgnoreCase),
+            IndexProfiles.Frontend => string.Equals(result.IndexProfile, IndexProfiles.Frontend, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(result.ContentType, IndexedContentTypes.Markup, StringComparison.OrdinalIgnoreCase) ||
+                IsFrontendLanguage(result.Language),
+            IndexProfiles.Tests => string.Equals(result.IndexProfile, IndexProfiles.Tests, StringComparison.OrdinalIgnoreCase) ||
+                IsTestPath(result.FilePath) ||
+                result.SymbolName.Contains("test", StringComparison.OrdinalIgnoreCase),
+            _ => true
+        };
+
+    private static bool IsFrontendLanguage(string language)
+        => language.Equals("javascript", StringComparison.OrdinalIgnoreCase) ||
+            language.Equals("typescript", StringComparison.OrdinalIgnoreCase) ||
+            language.Equals("jsx", StringComparison.OrdinalIgnoreCase) ||
+            language.Equals("tsx", StringComparison.OrdinalIgnoreCase) ||
+            language.Equals("html", StringComparison.OrdinalIgnoreCase) ||
+            language.Equals("css", StringComparison.OrdinalIgnoreCase);
+
+    private static bool FileMatchesProfile(string filePath, string profile)
+        => profile == IndexProfiles.All ||
+            string.Equals(GetIndexProfile(filePath, GuessContentType(filePath)), profile, StringComparison.OrdinalIgnoreCase);
+
+    private static string GetIndexProfile(string filePath, string contentType)
+    {
+        if (string.Equals(contentType, IndexedContentTypes.Documentation, StringComparison.OrdinalIgnoreCase))
+        {
+            return IndexProfiles.Documentation;
+        }
+
+        if (string.Equals(contentType, IndexedContentTypes.ProjectMetadata, StringComparison.OrdinalIgnoreCase))
+        {
+            return IndexProfiles.Metadata;
+        }
+
+        if (IsTestPath(filePath))
+        {
+            return IndexProfiles.Tests;
+        }
+
+        if (string.Equals(contentType, IndexedContentTypes.Markup, StringComparison.OrdinalIgnoreCase) ||
+            IsFrontendPath(filePath))
+        {
+            return IndexProfiles.Frontend;
+        }
+
+        return IndexProfiles.Code;
+    }
+
+    private static string GuessContentType(string filePath)
+    {
+        var extension = Path.GetExtension(filePath);
+        if (string.Equals(extension, ".md", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(extension, ".mdx", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(extension, ".txt", StringComparison.OrdinalIgnoreCase))
+        {
+            return IndexedContentTypes.Documentation;
+        }
+
+        if (IsProjectMetadataPath(filePath))
+        {
+            return IndexedContentTypes.ProjectMetadata;
+        }
+
+        if (IsMarkupPath(filePath))
+        {
+            return IndexedContentTypes.Markup;
+        }
+
+        return IndexedContentTypes.Code;
+    }
+
+    private static bool IsProjectMetadataPath(string filePath)
+    {
+        var fileName = Path.GetFileName(filePath);
+        var extension = Path.GetExtension(filePath);
+        return string.Equals(extension, ".sln", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(extension, ".csproj", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(extension, ".props", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(extension, ".targets", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(fileName, "Directory.Packages.props", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(fileName, "global.json", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(fileName, "appsettings.json", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(fileName, "launchSettings.json", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(fileName, "NuGet.config", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(fileName, ".editorconfig", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(fileName, "Dockerfile", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(extension, ".yml", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(extension, ".yaml", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsFrontendPath(string filePath)
+    {
+        var extension = Path.GetExtension(filePath).ToLowerInvariant();
+        if (extension is ".jsx" or ".tsx" or ".vue" or ".svelte" or ".css" or ".scss")
+        {
+            return true;
+        }
+
+        var segments = filePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return segments.Any(segment =>
+            string.Equals(segment, "frontend", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(segment, "client", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(segment, "ui", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(segment, "wwwroot", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsMarkupPath(string filePath)
+    {
+        var extension = Path.GetExtension(filePath).ToLowerInvariant();
+        return extension is ".html" or ".htm" or ".razor" or ".cshtml";
+    }
+
+    private static bool IsTestPath(string filePath)
+    {
+        var normalized = filePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        var fileName = Path.GetFileNameWithoutExtension(normalized);
+        return normalized.Contains($"{Path.DirectorySeparatorChar}tests{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains($"{Path.DirectorySeparatorChar}test{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
+            fileName.EndsWith("Tests", StringComparison.OrdinalIgnoreCase) ||
+            fileName.EndsWith("Test", StringComparison.OrdinalIgnoreCase);
     }
 
     private void EnsureAllowedWorkspaceRoot(string workspaceRoot)

@@ -16,9 +16,10 @@ internal static class TextChunkBuilder
         int endLine,
         string content,
         string contentType,
-        int maxChunkChars = DefaultMaxChunkChars)
+        int maxChunkChars = DefaultMaxChunkChars,
+        int maxEstimatedTokens = TokenBudget.DefaultMaxEstimatedTokens)
     {
-        if (content.Length <= maxChunkChars)
+        if (content.Length <= maxChunkChars && TokenBudget.Estimate(content) <= maxEstimatedTokens)
         {
             return
             [
@@ -41,13 +42,60 @@ internal static class TextChunkBuilder
         var partLines = new List<string>();
         var partStartLine = startLine;
         var currentLength = 0;
+        var currentEstimatedTokens = 0;
         var part = 1;
 
         for (var index = 0; index < lines.Length; index++)
         {
             var line = lines[index];
             var lineLength = line.Length + Environment.NewLine.Length;
-            if (partLines.Count > 0 && currentLength + lineLength > maxChunkChars)
+            var lineEstimatedTokens = TokenBudget.Estimate(line);
+
+            if (lineLength > maxChunkChars || lineEstimatedTokens > maxEstimatedTokens)
+            {
+                if (partLines.Count > 0)
+                {
+                    chunks.Add(CreatePart(
+                        workspaceRoot,
+                        filePath,
+                        language,
+                        symbolName,
+                        symbolKind,
+                        partStartLine,
+                        partStartLine + partLines.Count - 1,
+                        part,
+                        partLines,
+                        contentType));
+
+                    part++;
+                    partLines.Clear();
+                    currentLength = 0;
+                    currentEstimatedTokens = 0;
+                }
+
+                foreach (var segment in SplitLongLine(line, maxChunkChars, maxEstimatedTokens))
+                {
+                    chunks.Add(CreatePart(
+                        workspaceRoot,
+                        filePath,
+                        language,
+                        symbolName,
+                        symbolKind,
+                        startLine + index,
+                        startLine + index,
+                        part,
+                        [segment],
+                        contentType));
+                    part++;
+                }
+
+                partStartLine = startLine + index + 1;
+                continue;
+            }
+
+            if (partLines.Count > 0 &&
+                (currentLength + lineLength > maxChunkChars ||
+                    currentEstimatedTokens + lineEstimatedTokens > maxEstimatedTokens))
             {
                 chunks.Add(CreatePart(
                     workspaceRoot,
@@ -64,11 +112,13 @@ internal static class TextChunkBuilder
                 part++;
                 partLines.Clear();
                 currentLength = 0;
+                currentEstimatedTokens = 0;
                 partStartLine = startLine + index;
             }
 
             partLines.Add(line);
             currentLength += lineLength;
+            currentEstimatedTokens += lineEstimatedTokens;
         }
 
         if (partLines.Count > 0)
@@ -91,6 +141,20 @@ internal static class TextChunkBuilder
 
     public static string NormalizeNewlines(string value)
         => value.Replace("\r\n", "\n").Replace('\r', '\n');
+
+    private static IEnumerable<string> SplitLongLine(string line, int maxChunkChars, int maxEstimatedTokens)
+    {
+        var estimatedTokens = TokenBudget.Estimate(line);
+        var segmentCount = Math.Max(
+            (line.Length + maxChunkChars - 1) / maxChunkChars,
+            (estimatedTokens + maxEstimatedTokens - 1) / maxEstimatedTokens);
+        var segmentLength = Math.Max(1, (line.Length + segmentCount - 1) / segmentCount);
+
+        for (var offset = 0; offset < line.Length; offset += segmentLength)
+        {
+            yield return line.Substring(offset, Math.Min(segmentLength, line.Length - offset));
+        }
+    }
 
     private static CodeChunk CreatePart(
         string workspaceRoot,

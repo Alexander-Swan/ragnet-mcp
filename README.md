@@ -65,11 +65,13 @@ The current implementation indexes C# files through Roslyn, stores embeddings an
 
 Agents can use `trigger_indexing` as the generic indexing entry point. Pass `workspace_path` to index one workspace, or `workspace_group` to index a configured multi-project product. The older `index_workspace` and `index_workspace_group` tools remain available as explicit lower-level variants.
 
+Indexing and search support conservative profiles: `all`, `code`, `docs`, `metadata`, `frontend`, and `tests`. Use `index_profile` to update one profile at a time, and `search_profile` to constrain `search_code` or `hybrid_search` results. `all` is the default.
+
 ## Incremental Indexing
 
 After the first `index_workspace` run, RagNet stores content-hash file fingerprints in `.ragnet/state.json` under the indexed workspace. Later indexing runs compare the current file list with that state and only re-analyze/re-embed files that changed. Deleted files are removed from the vector store before the state is saved.
 
-The state file also records the embedding model, index/analyzer schema version, and last saved timestamp. If the configured embedding model or schema version changes, RagNet automatically clears the workspace vectors and performs a full reindex. You can force the same lifecycle manually by passing `force: true` to `index_workspace` or `index_workspace_group`.
+The state file also records the embedding model, index/analyzer schema version, and last saved timestamp. If the configured embedding model or schema version changes, RagNet automatically clears the workspace vectors and performs a full reindex. You can force the same lifecycle manually by passing `force: true` to `index_workspace` or `index_workspace_group`. Profile-scoped indexing updates only files in that profile and requires a compatible existing all-profile state.
 
 Qdrant collections are named deterministically as `{CollectionPrefix}-{workspaceId}`, where `workspaceId` is derived from the normalized workspace root rather than the raw path. The default prefix is `ragnet`. A forced/full reindex deletes the workspace collection and recreates it with the current embedding vector size. To manually reset a workspace index, run `index_workspace` with `force: true`, or delete the matching collection from Qdrant and re-run indexing.
 
@@ -133,6 +135,25 @@ Documentation indexing should use document-specific analyzers instead of code an
 - Preserve heading hierarchy, page title, anchors, source path, workspace group, repository metadata, and `contentType = documentation` in vector payloads.
 - Add search filters for `code`, `documentation`, or both, plus retrieval modes such as `docs_first`, `code_first`, and `balanced`.
 - Add a general context tool or extend existing context tools so agents can retrieve project documentation alongside code context.
+
+Ambiguous extensions such as `*.html`, `*.htm`, and `*.mdx` are classified by analyzer confidence instead of path alone. Documentation and markup analyzers both inspect content signals, then configurable path overrides can force known folders toward documentation or application markup:
+
+```json
+{
+  "RagNet": {
+    "Classification": {
+      "DocumentationPathPatterns": [
+        "**/docs/**",
+        "**/knowledge-base/**"
+      ],
+      "ApplicationMarkupPathPatterns": [
+        "**/src/**",
+        "**/client-app/templates/**"
+      ]
+    }
+  }
+}
+```
 
 ## Language Support
 
@@ -235,6 +256,8 @@ Search defaults to the current workspace only. To search beyond the current work
 - `all_indexed_workspaces`
 
 For a group search, pass `scope: "named_workspace_group"` and `workspace_group: "billing-product"` to `search_code` or `hybrid_search`.
+
+Use `search_profile` when you want a narrower retrieval surface, such as `docs`, `metadata`, `frontend`, or `tests`. `content_type` remains available for lower-level filters like `documentation`, `project_metadata`, or `markup`.
 
 ## Visual Studio and GitHub Copilot
 

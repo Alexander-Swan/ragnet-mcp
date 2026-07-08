@@ -56,6 +56,7 @@ public sealed class InMemoryVectorStore : IVectorStore
         int limit,
         bool hybrid,
         string? contentType = null,
+        string? indexProfile = null,
         CancellationToken cancellationToken = default)
     {
         List<Entry> entries;
@@ -65,10 +66,13 @@ public sealed class InMemoryVectorStore : IVectorStore
         }
 
         var normalizedContentType = NormalizeContentType(contentType);
+        var normalizedIndexProfile = NormalizeIndexProfile(indexProfile);
         var tokens = query.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         var results = entries
             .Where(entry => normalizedContentType is null ||
                 string.Equals(entry.Chunk.ContentType, normalizedContentType, StringComparison.OrdinalIgnoreCase))
+            .Where(entry => normalizedIndexProfile is null ||
+                string.Equals(entry.Chunk.IndexProfile, normalizedIndexProfile, StringComparison.OrdinalIgnoreCase))
             .Select(entry =>
             {
                 var semanticScore = CosineSimilarity(embedding, entry.Embedding);
@@ -92,6 +96,7 @@ public sealed class InMemoryVectorStore : IVectorStore
         return new SearchResult(chunk.FilePath, chunk.SymbolName, chunk.SymbolKind, chunk.StartLine, chunk.EndLine, score, preview)
         {
             ContentType = chunk.ContentType,
+            IndexProfile = chunk.IndexProfile,
             Language = chunk.Language
         };
     }
@@ -106,6 +111,9 @@ public sealed class InMemoryVectorStore : IVectorStore
 
         return contentType.Trim();
     }
+
+    private static string? NormalizeIndexProfile(string? indexProfile)
+        => IndexProfiles.NormalizeFilter(indexProfile);
 
     private static double KeywordScore(string text, IReadOnlyList<string> tokens)
     {
