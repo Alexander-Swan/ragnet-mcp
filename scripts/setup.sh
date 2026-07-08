@@ -6,6 +6,7 @@ EMBEDDING_MODEL="${EMBEDDING_MODEL:-mxbai-embed-large}"
 ADDITIONAL_EMBEDDING_MODELS="${ADDITIONAL_EMBEDDING_MODELS:-nomic-embed-text}"
 OLLAMA_MODE="${OLLAMA_MODE:-${2:-Auto}}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN_DIR="$REPO_ROOT/bin"
 
 export DOTNET_CLI_HOME="$REPO_ROOT/.dotnet-home"
 export DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
@@ -106,31 +107,31 @@ if [[ "$MODE" == "Docker" ]]; then
     echo "Docker mode requires the Docker Ollama service from docker-compose.yml. Use Hybrid or Native mode with OLLAMA_MODE=Local." >&2
     exit 1
   fi
+  export RAGNET_EMBEDDING_MODEL="$EMBEDDING_MODEL"
+  export RAGNET_OLLAMA_BASE_URL="http://ollama:11434"
   docker compose up -d --build
   pull_ollama_models true
 elif [[ "$MODE" == "Hybrid" ]]; then
   require_command docker
   require_command dotnet
+  export RAGNET_EMBEDDING_MODEL="$EMBEDDING_MODEL"
   if use_ollama_container; then
+    export RAGNET_OLLAMA_BASE_URL="http://ollama:11434"
     docker compose up -d qdrant ollama
     pull_ollama_models true
   else
+    export RAGNET_OLLAMA_BASE_URL="http://host.docker.internal:11434"
     docker compose up -d qdrant
     pull_ollama_models false
   fi
+  docker compose up -d --build --no-deps ragnet-mcp
   dotnet restore ./RagNet.Mcp.sln
-  dotnet publish ./src/RagNet.Mcp/RagNet.Mcp.csproj \
-    -c Release \
-    -r linux-x64 \
-    --self-contained true \
-    /p:PublishSingleFile=true \
-    -o ./artifacts/publish/linux-x64/ragnet-mcp
   dotnet publish ./src/RagNet.Indexer/RagNet.Indexer.csproj \
     -c Release \
     -r linux-x64 \
     --self-contained true \
     /p:PublishSingleFile=true \
-    -o ./artifacts/publish/linux-x64/ragnet-indexer
+    -o "$BIN_DIR"
 else
   require_command dotnet
   if [[ "$OLLAMA_MODE" == "Docker" ]]; then
@@ -139,18 +140,18 @@ else
     pull_ollama_models false
   fi
   dotnet restore ./RagNet.Mcp.sln
-  dotnet publish ./src/RagNet.Mcp/RagNet.Mcp.csproj \
-    -c Release \
-    -r linux-x64 \
-    --self-contained true \
-    /p:PublishSingleFile=true \
-    -o ./artifacts/publish/linux-x64/ragnet-mcp
   dotnet publish ./src/RagNet.Indexer/RagNet.Indexer.csproj \
     -c Release \
     -r linux-x64 \
     --self-contained true \
     /p:PublishSingleFile=true \
-    -o ./artifacts/publish/linux-x64/ragnet-indexer
+    -o "$BIN_DIR"
+  dotnet publish ./src/RagNet.Mcp/RagNet.Mcp.csproj \
+    -c Release \
+    -r linux-x64 \
+    --self-contained true \
+    /p:PublishSingleFile=true \
+    -o "$BIN_DIR"
 fi
 
 pwsh ./scripts/register-copilot.ps1 2>/dev/null || true
@@ -159,6 +160,10 @@ echo ""
 echo "RagNet MCP setup complete."
 echo "MCP endpoint: http://localhost:7331/ragnet-mcp"
 echo "Health:       http://localhost:7331/health"
-if [[ "$MODE" != "Docker" ]]; then
-  echo "Indexer:      ./artifacts/publish/linux-x64/ragnet-indexer/ragnet-indexer"
+if [[ "$MODE" == "Hybrid" ]]; then
+  echo "Server:       docker container ragnet-mcp"
+  echo "Indexer:      ./bin/ragnet-indexer"
+elif [[ "$MODE" == "Native" ]]; then
+  echo "Server:       ./bin/ragnet-mcp"
+  echo "Indexer:      ./bin/ragnet-indexer"
 fi

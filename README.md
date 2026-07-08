@@ -8,9 +8,10 @@ The default setup is hybrid:
 
 - Docker starts `qdrant` on `http://localhost:6333`
 - Docker starts `ollama` on `http://localhost:11434`, unless Hybrid setup is configured to use local Ollama
-- .NET publishes native `ragnet-mcp` and `ragnet-indexer` executables under `artifacts/publish`
+- Docker starts `ragnet-mcp` on `http://localhost:7331`
+- .NET publishes the local `ragnet-indexer` executable under `bin`
 
-Full Docker mode is still available, but it requires explicit source mounts or another source-sync strategy before the containerized MCP server can read arbitrary host workspaces.
+Native MCP mode is still available, but the recommended local shape is Docker MCP plus the local indexer. The containerized MCP server should be treated as the shared search/query service; use the local indexer for host paths like `D:\Work\Product\Api`.
 
 MCP endpoint:
 
@@ -30,7 +31,7 @@ http://localhost:7331/health
 .\scripts\setup.ps1
 ```
 
-The setup script starts Qdrant/Ollama, publishes the native web service and indexer executables, pulls the default Ollama embedding model plus `nomic-embed-text` for compatibility, writes repo-local MCP registration files for Visual Studio and VS Code, registers Codex/Codex CLI when `codex` is available on PATH, and registers Claude Code when `claude` is available on PATH.
+The setup script starts Qdrant, RagNet MCP, and Ollama in Docker, publishes the local indexer executable, pulls the default Ollama embedding model plus `nomic-embed-text` for compatibility, writes repo-local MCP registration files for Visual Studio and VS Code, registers Codex/Codex CLI when `codex` is available on PATH, and registers Claude Code when `claude` is available on PATH.
 
 If Ollama is already running on `localhost:11434`, Hybrid setup reuses it and starts only Qdrant in Docker.
 
@@ -40,10 +41,10 @@ To force local Ollama instead of the Docker Ollama image:
 .\scripts\setup.ps1 -Mode Hybrid -OllamaMode Local
 ```
 
-In Hybrid mode, setup publishes `ragnet-mcp.exe` but does not leave it running. Start it with:
+In Hybrid mode, setup leaves `ragnet-mcp` running in Docker. Check it with:
 
 ```powershell
-.\artifacts\publish\win-x64\ragnet-mcp\ragnet-mcp.exe
+docker compose ps ragnet-mcp
 ```
 
 See [SETUP.md](SETUP.md) for the full setup, verification, indexing, and troubleshooting flow.
@@ -64,6 +65,8 @@ The initial tool surface is:
 The current implementation indexes C# files through Roslyn, stores embeddings and chunk payloads in Qdrant, and reconstructs search results from Qdrant payload data. Hybrid search asks Qdrant for semantic candidates and applies a local lexical boost over the stored chunk content before returning results.
 
 Agents can use `trigger_indexing` as the generic indexing entry point. Pass `workspace_path` to index one workspace, or `workspace_group` to index a configured multi-project product. The older `index_workspace` and `index_workspace_group` tools remain available as explicit lower-level variants.
+
+In the default Hybrid setup, `ragnet-mcp` runs in Docker. Use MCP indexing tools only for paths visible inside that container. For ordinary local host paths, use `bin\ragnet-indexer.exe`; it writes to the same Qdrant collections used by MCP search.
 
 Indexing and search support conservative profiles: `all`, `code`, `docs`, `metadata`, `frontend`, and `tests`. Use `index_profile` to update one profile at a time, and `search_profile` to constrain `search_code` or `hybrid_search` results. `all` is the default.
 
@@ -93,10 +96,10 @@ The solution is split into logical assemblies:
 Agents can trigger indexing through the `trigger_indexing` MCP tool. Humans, scripts, CI jobs, and future webhook workers can run the same pipeline through `ragnet-indexer`:
 
 ```powershell
-dotnet run --project .\src\RagNet.Indexer -- index --workspace D:\Work\Product\Api
-dotnet run --project .\src\RagNet.Indexer -- index --workspace D:\Work\Product\Api --force
-dotnet run --project .\src\RagNet.Indexer -- index-group --group my-product
-dotnet run --project .\src\RagNet.Indexer -- status --workspace D:\Work\Product\Api
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --force
+.\bin\ragnet-indexer.exe index-group --group my-product
+.\bin\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
 ```
 
 The CLI prints progress for each indexing phase to stderr and leaves the final JSON result on stdout for scripts. Pass `--no-progress` to suppress progress output.
@@ -113,7 +116,7 @@ RagNet should support both local-only and hosted/team usage without forcing the 
 - Prefer Git metadata when available: repository root, remote URL, branch, commit SHA, changed files, and deleted files. The system should still work without Git, but with reduced functionality based on filesystem scanning and content fingerprints.
 - Add GitHub/GitLab/Azure DevOps-style change notifications later. Push/webhook events should enqueue incremental reindexing for affected repositories/workspaces instead of requiring a full scan every time.
 - Store enough source metadata in vector payloads for hosted search: repository URL, commit SHA, relative path, symbol details, line numbers, and chunk content. A cloud-hosted search service cannot read `D:\...` local files, so context must come from indexed payloads or a repo checkout/object store.
-- Keep Docker-only mode optional. If `ragnet-mcp` itself runs in Docker, workspace folders must be mounted or synced explicitly; the preferred local mode is native indexer plus web search service connected to Dockerized Qdrant/Ollama.
+- Keep full Docker indexing optional. Since `ragnet-mcp` runs in Docker by default, arbitrary host workspace paths should be indexed with the local indexer unless those paths are mounted or synced into the container.
 
 ## Documentation Indexing TODO
 
@@ -326,9 +329,9 @@ claude mcp add --scope user --transport http ragnet-mcp http://localhost:7331/ra
 
 Use `-Scope local` or `-Scope project` when you want Claude Code registration scoped differently. Restart Claude Code after registration if the server is not discovered immediately.
 
-## Native Publish
+## Setup Modes
 
-Hybrid native/container setup is the default. You can still choose full Docker mode or native-only publishing:
+Hybrid Docker MCP plus local indexer is the default. You can still choose full Docker mode or native-only publishing:
 
 ```powershell
 .\scripts\setup.ps1 -Mode Hybrid
@@ -336,11 +339,17 @@ Hybrid native/container setup is the default. You can still choose full Docker m
 .\scripts\setup.ps1 -Mode Native
 ```
 
-The Windows executables are published to:
+Hybrid publishes the local indexer to:
 
 ```text
-artifacts/publish/win-x64/ragnet-mcp
-artifacts/publish/win-x64/ragnet-indexer
+bin/ragnet-indexer.exe
+```
+
+Native mode publishes both Windows executables to:
+
+```text
+bin/ragnet-mcp.exe
+bin/ragnet-indexer.exe
 ```
 
 ## Development

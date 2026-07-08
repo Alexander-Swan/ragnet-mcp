@@ -1,6 +1,6 @@
 # Setup
 
-This guide sets up RagNet MCP for local use with Dockerized infrastructure and native Windows executables. That is the recommended mode because the native indexer can read normal host paths like `D:\Work\Product\Api` without mounting source folders into a container.
+This guide sets up RagNet MCP for local use with a Dockerized MCP/search service and a native Windows indexer. That is the recommended mode because the local indexer can read normal host paths like `D:\Work\Product\Api` without mounting source folders into a container, while MCP/search stays available over HTTP for multiple tools.
 
 ## Prerequisites
 
@@ -27,13 +27,13 @@ Hybrid mode does this:
 
 - starts Qdrant at `http://localhost:6333`
 - starts Ollama at `http://localhost:11434`, unless something is already listening there
+- starts RagNet MCP at `http://localhost:7331`
 - pulls the primary embedding model, default `mxbai-embed-large`
 - pulls additional compatibility embedding models, default `nomic-embed-text`
-- publishes `ragnet-mcp.exe`
 - publishes `ragnet-indexer.exe`
 - registers MCP configs for supported local tools
 
-If you already run Ollama locally, setup reuses that host Ollama and starts only Qdrant in Docker. This avoids Docker port conflicts on `11434`.
+If you already run Ollama locally, setup reuses that host Ollama from the MCP container through `host.docker.internal:11434` and starts only Qdrant plus RagNet MCP in Docker. This avoids Docker port conflicts on `11434`.
 
 To explicitly use local Ollama and never start the Docker Ollama image:
 
@@ -76,16 +76,15 @@ ADDITIONAL_EMBEDDING_MODELS="nomic-embed-text all-minilm" ./scripts/setup.sh Hyb
 The published executables are written to:
 
 ```text
-artifacts\publish\win-x64\ragnet-mcp\ragnet-mcp.exe
-artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe
+bin\ragnet-indexer.exe
 ```
 
 ## Start The MCP Server
 
-In Hybrid mode, setup publishes the server but does not leave it running. Start it in a terminal:
+In Hybrid mode, setup starts the MCP server in Docker. Check it with:
 
 ```powershell
-.\artifacts\publish\win-x64\ragnet-mcp\ragnet-mcp.exe
+docker compose ps ragnet-mcp
 ```
 
 Then check:
@@ -137,7 +136,7 @@ Restart Visual Studio, VS Code, Codex, or Claude Code if the MCP server is not d
 
 ## Index A Workspace
 
-You can index from an agent through the MCP tool:
+You can index container-visible workspaces from an agent through the MCP tool:
 
 ```text
 trigger_indexing
@@ -146,25 +145,25 @@ trigger_indexing
 Pass:
 
 ```text
-workspace_path = D:\Work\Product\Api
+workspace_path = /workspace/Product/Api
 ```
 
-You can also use the local indexer executable:
+For normal local Windows paths like `D:\Work\Product\Api`, use the local indexer executable instead. The Docker MCP container cannot read arbitrary host paths unless you mount or sync them:
 
 ```powershell
-.\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
 ```
 
 The indexer prints progress to stderr and writes the final JSON result to stdout. For quiet automation:
 
 ```powershell
-.\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --no-progress
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --no-progress
 ```
 
 Check index state:
 
 ```powershell
-.\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
+.\bin\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
 ```
 
 ## Search
@@ -191,7 +190,7 @@ Provide a `file_path` inside an indexed workspace and a natural-language query.
 .\scripts\setup.ps1 -Mode Hybrid
 ```
 
-Recommended for local development. Qdrant and Ollama run in Docker; RagNet MCP and the indexer run as native executables.
+Recommended for local development. Qdrant and RagNet MCP run in Docker. Ollama runs in Docker unless an existing local Ollama is detected. The indexer runs as a local executable so it can read host source folders directly.
 
 Use local Ollama instead of the Docker image:
 
@@ -213,7 +212,7 @@ Runs Qdrant, Ollama, and `ragnet-mcp` in Docker. Use this only when the code to 
 .\scripts\setup.ps1 -Mode Native
 ```
 
-Publishes native executables only. Use this when Qdrant and Ollama already exist locally or remotely.
+Publishes native `ragnet-mcp` and `ragnet-indexer` executables only. Use this when Qdrant and Ollama already exist locally or remotely, or when you explicitly want MCP outside Docker.
 
 ## Common Commands
 
@@ -241,10 +240,10 @@ Start the MCP server from source:
 dotnet run --project .\src\RagNet.Mcp\RagNet.Mcp.csproj
 ```
 
-Run the indexer from source:
+Run the published indexer executable:
 
 ```powershell
-dotnet run --project .\src\RagNet.Indexer -- index --workspace "D:\Work\Product\Api"
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
 ```
 
 ## Troubleshooting

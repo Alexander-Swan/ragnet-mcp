@@ -8,7 +8,7 @@ For detailed setup, modes, registration, and troubleshooting, see [SETUP.md](SET
 .\scripts\setup.ps1 -Mode Hybrid
 ```
 
-This starts Qdrant and Ollama in Docker, pulls the default RagNet embedding model plus `nomic-embed-text` for compatibility, publishes native Windows executables, and registers supported MCP clients:
+This starts Qdrant and RagNet MCP in Docker, starts Ollama in Docker unless local Ollama is already available, pulls the default RagNet embedding model plus `nomic-embed-text` for compatibility, publishes the local indexer executable, and registers supported MCP clients:
 
 - `.mcp.json` for Visual Studio
 - `.vscode/mcp.json` for VS Code
@@ -21,12 +21,12 @@ To use an existing local Ollama instead of the Docker Ollama image:
 .\scripts\setup.ps1 -Mode Hybrid -OllamaMode Local
 ```
 
-## 2. Start RagNet MCP
+## 2. Check RagNet MCP
 
-Hybrid setup publishes the server but does not keep it running. Start it:
+Hybrid setup leaves the server running in Docker:
 
 ```powershell
-.\artifacts\publish\win-x64\ragnet-mcp\ragnet-mcp.exe
+docker compose ps ragnet-mcp
 ```
 
 The MCP endpoint is:
@@ -56,7 +56,15 @@ Restart Visual Studio, VS Code, Codex, Codex CLI, or Claude Code if the MCP serv
 
 ## 4. Index a Workspace
 
-Call the MCP tool:
+For normal local workspaces, run the local indexer:
+
+```powershell
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --profile docs
+.\bin\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
+```
+
+Call the MCP indexing tool only for paths visible inside the `ragnet-mcp` container:
 
 ```text
 trigger_indexing
@@ -78,18 +86,10 @@ To inspect saved state, call:
 get_index_status
 ```
 
-You can also run the same indexing pipeline without MCP:
-
-```powershell
-.\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
-.\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --profile docs
-.\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
-```
-
 The indexer writes progress to stderr while keeping the final JSON result on stdout. Use `--no-progress` for quiet automation:
 
 ```powershell
-.\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --no-progress
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --no-progress
 ```
 
 This is the preferred shape for local automation or future CI/webhook indexing because the indexer runs where the source files are available.
