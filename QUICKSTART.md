@@ -1,35 +1,41 @@
 # Quickstart
 
-## 1. Start Everything
+For detailed setup, modes, registration, and troubleshooting, see [SETUP.md](SETUP.md).
+
+## 1. Run Setup
 
 ```powershell
-.\scripts\setup.ps1
+.\scripts\setup.ps1 -Mode Hybrid
 ```
 
-This starts:
-
-- Qdrant
-- Ollama
-
-It also publishes native executables for:
-
-- RagNet MCP web/search service
-- RagNet Indexer CLI
-
-It also registers:
+This starts Qdrant and Ollama in Docker, pulls the default embedding model, publishes native Windows executables, and registers supported MCP clients:
 
 - `.mcp.json` for Visual Studio
 - `.vscode/mcp.json` for VS Code
+- `ragnet-mcp` in Codex/Codex CLI when `codex` is available on PATH
+- `ragnet-mcp` in Claude Code when `claude` is available on PATH
 
-Use full Docker mode only when you have an explicit source mounting/sync strategy:
+To use an existing local Ollama instead of the Docker Ollama image:
 
 ```powershell
-.\scripts\setup.ps1 -Mode Docker
+.\scripts\setup.ps1 -Mode Hybrid -OllamaMode Local
 ```
 
-## 2. Check Health
+## 2. Start RagNet MCP
 
-Open:
+Hybrid setup publishes the server but does not keep it running. Start it:
+
+```powershell
+.\artifacts\publish\win-x64\ragnet-mcp\ragnet-mcp.exe
+```
+
+The MCP endpoint is:
+
+```text
+http://localhost:7331/ragnet-mcp
+```
+
+Health check:
 
 ```text
 http://localhost:7331/health
@@ -44,9 +50,9 @@ Expected response:
 }
 ```
 
-## 3. Use From Copilot
+## 3. Use From An Agent
 
-Restart Visual Studio or VS Code if the MCP server is not discovered immediately. Open Copilot Chat in agent mode and enable the `ragnet-mcp` server/tools if prompted.
+Restart Visual Studio, VS Code, Codex, Codex CLI, or Claude Code if the MCP server is not discovered immediately. Open the agent chat and enable the `ragnet-mcp` server/tools if prompted.
 
 ## 4. Index a Workspace
 
@@ -73,14 +79,14 @@ get_index_status
 You can also run the same indexing pipeline without MCP:
 
 ```powershell
-dotnet run --project .\src\RagNet.Indexer -- index --workspace D:\Work\Product\Api
-dotnet run --project .\src\RagNet.Indexer -- status --workspace D:\Work\Product\Api
+.\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
+.\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
 ```
 
 The indexer writes progress to stderr while keeping the final JSON result on stdout. Use `--no-progress` for quiet automation:
 
 ```powershell
-dotnet run --project .\src\RagNet.Indexer -- index --workspace D:\Work\Product\Api --no-progress
+.\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --no-progress
 ```
 
 This is the preferred shape for local automation or future CI/webhook indexing because the indexer runs where the source files are available.

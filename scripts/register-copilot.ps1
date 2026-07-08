@@ -1,6 +1,8 @@
 param(
     [string]$Url = "http://localhost:7331/ragnet-mcp",
-    [string]$Name = "ragnet-mcp"
+    [string]$Name = "ragnet-mcp",
+    [switch]$SkipCodex,
+    [switch]$SkipClaude
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,7 +17,7 @@ $VisualStudioConfig = [ordered]@{
     servers = @(
         [ordered]@{
             name = $Name
-            transport = "sse"
+            transport = "http"
             url = $Url
         }
     )
@@ -41,3 +43,11 @@ $VsCodeConfig |
 Write-Host "Registered MCP configs:"
 Write-Host "  Visual Studio: .mcp.json"
 Write-Host "  VS Code:       .vscode/mcp.json"
+
+if (-not $SkipCodex) {
+    & (Join-Path $PSScriptRoot "register-codex.ps1") -Url $Url -Name $Name -Optional
+}
+
+if (-not $SkipClaude) {
+    & (Join-Path $PSScriptRoot "register-claude.ps1") -Url $Url -Name $Name -Optional
+}

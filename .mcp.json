@@ -2,7 +2,7 @@
   "servers": [
     {
       "name": "ragnet-mcp",
-      "transport": "sse",
+      "transport": "http",
       "url": "http://localhost:7331/ragnet-mcp"
     }
   ]

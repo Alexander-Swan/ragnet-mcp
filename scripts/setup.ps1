@@ -4,6 +4,9 @@ param(
 
     [string]$EmbeddingModel = "mxbai-embed-large",
 
+    [ValidateSet("Auto", "Docker", "Local")]
+    [string]$OllamaMode = "Auto",
+
     [switch]$SkipModelPull,
 
     [switch]$SkipRegister
@@ -24,57 +27,141 @@ function Require-Command {
     }
 }
 
+function Invoke-Native {
+    param(
+        [scriptblock]$Command
+    )
+
+    & $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Test-PortInUse {
+    param([int]$Port)
+
+    $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    return $null -ne $connections
+}
+
+function Pull-OllamaModel {
+    param(
+        [string]$Model,
+        [bool]$UseContainer
+    )
+
+    if ($SkipModelPull) {
+        return
+    }
+
+    if ($UseContainer) {
+        Invoke-Native { docker exec ollama ollama pull $Model }
+        return
+    }
+
+    $ollama = Get-Command "ollama" -ErrorAction SilentlyContinue
+    if ($ollama) {
+        Invoke-Native { ollama pull $Model }
+        return
+    }
+
+    Write-Warning "Local Ollama is selected, but the ollama CLI was not found. Skipping model pull for '$Model'."
+    Write-Warning "Run 'ollama pull $Model' manually if the model is not already installed."
+}
+
+function Use-OllamaContainer {
+    if ($OllamaMode -eq "Local") {
+        if (-not (Test-PortInUse 11434)) {
+            Write-Warning "OllamaMode is Local, but nothing is listening on localhost:11434 yet."
+            Write-Warning "Start local Ollama before indexing, or rerun setup with -OllamaMode Docker."
+        }
+
+        return $false
+    }
+
+    if ($OllamaMode -eq "Docker") {
+        if (Test-PortInUse 11434) {
+            throw "OllamaMode is Docker, but localhost:11434 is already in use. Stop the local service or use -OllamaMode Local."
+        }
+
+        return $true
+    }
+
+    if (Test-PortInUse 11434) {
+        Write-Warning "Port 11434 is already in use. Hybrid setup will use the existing Ollama at http://localhost:11434 and start only Qdrant in Docker."
+        return $false
+    }
+
+    return $true
+}
+
 Push-Location $RepoRoot
 try {
     if ($Mode -eq "Docker") {
         Require-Command "docker"
 
-        docker compose up -d --build
+        if ($OllamaMode -eq "Local") {
+            throw "Docker mode requires the Docker Ollama service from docker-compose.yml. Use Hybrid or Native mode with -OllamaMode Local."
+        }
+
+        Invoke-Native { docker compose up -d --build }
 
         if (-not $SkipModelPull) {
-            docker exec ollama ollama pull $EmbeddingModel
+            Invoke-Native { docker exec ollama ollama pull $EmbeddingModel }
         }
     }
     elseif ($Mode -eq "Hybrid") {
         Require-Command "docker"
         Require-Command "dotnet"
 
-        docker compose up -d qdrant ollama
-
-        if (-not $SkipModelPull) {
-            docker exec ollama ollama pull $EmbeddingModel
+        $useOllamaContainer = Use-OllamaContainer
+        if ($useOllamaContainer) {
+            Invoke-Native { docker compose up -d qdrant ollama }
+        }
+        else {
+            Invoke-Native { docker compose up -d qdrant }
         }
 
-        dotnet restore .\RagNet.Mcp.sln
-        dotnet publish .\src\RagNet.Mcp\RagNet.Mcp.csproj `
+        Pull-OllamaModel -Model $EmbeddingModel -UseContainer $useOllamaContainer
+
+        Invoke-Native { dotnet restore .\RagNet.Mcp.sln }
+        Invoke-Native { dotnet publish .\src\RagNet.Mcp\RagNet.Mcp.csproj `
             -c Release `
             -r win-x64 `
             --self-contained true `
             /p:PublishSingleFile=true `
-            -o .\artifacts\publish\win-x64\ragnet-mcp
-        dotnet publish .\src\RagNet.Indexer\RagNet.Indexer.csproj `
+            -o .\artifacts\publish\win-x64\ragnet-mcp }
+        Invoke-Native { dotnet publish .\src\RagNet.Indexer\RagNet.Indexer.csproj `
             -c Release `
             -r win-x64 `
             --self-contained true `
             /p:PublishSingleFile=true `
-            -o .\artifacts\publish\win-x64\ragnet-indexer
+            -o .\artifacts\publish\win-x64\ragnet-indexer }
     }
     else {
         Require-Command "dotnet"
 
-        dotnet restore .\RagNet.Mcp.sln
-        dotnet publish .\src\RagNet.Mcp\RagNet.Mcp.csproj `
+        if ($OllamaMode -eq "Docker") {
+            Write-Warning "Native mode does not start Docker Ollama. Use Hybrid mode with -OllamaMode Docker if you want setup to start Ollama in Docker."
+        }
+        elseif (-not $SkipModelPull) {
+            Pull-OllamaModel -Model $EmbeddingModel -UseContainer $false
+        }
+
+        Invoke-Native { dotnet restore .\RagNet.Mcp.sln }
+        Invoke-Native { dotnet publish .\src\RagNet.Mcp\RagNet.Mcp.csproj `
             -c Release `
             -r win-x64 `
             --self-contained true `
             /p:PublishSingleFile=true `
-            -o .\artifacts\publish\win-x64\ragnet-mcp
-        dotnet publish .\src\RagNet.Indexer\RagNet.Indexer.csproj `
+            -o .\artifacts\publish\win-x64\ragnet-mcp }
+        Invoke-Native { dotnet publish .\src\RagNet.Indexer\RagNet.Indexer.csproj `
             -c Release `
             -r win-x64 `
             --self-contained true `
             /p:PublishSingleFile=true `
-            -o .\artifacts\publish\win-x64\ragnet-indexer
+            -o .\artifacts\publish\win-x64\ragnet-indexer }
     }
 
     if (-not $SkipRegister) {

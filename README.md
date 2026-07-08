@@ -7,7 +7,7 @@ RagNet MCP is a .NET 10, container-first Model Context Protocol server for local
 The default setup is hybrid:
 
 - Docker starts `qdrant` on `http://localhost:6333`
-- Docker starts `ollama` on `http://localhost:11434`
+- Docker starts `ollama` on `http://localhost:11434`, unless Hybrid setup is configured to use local Ollama
 - .NET publishes native `ragnet-mcp` and `ragnet-indexer` executables under `artifacts/publish`
 
 Full Docker mode is still available, but it requires explicit source mounts or another source-sync strategy before the containerized MCP server can read arbitrary host workspaces.
@@ -30,7 +30,23 @@ http://localhost:7331/health
 .\scripts\setup.ps1
 ```
 
-The setup script starts Qdrant/Ollama, publishes the native web service and indexer executables, pulls the default Ollama embedding model, and writes repo-local MCP registration files for Visual Studio and VS Code.
+The setup script starts Qdrant/Ollama, publishes the native web service and indexer executables, pulls the default Ollama embedding model, writes repo-local MCP registration files for Visual Studio and VS Code, registers Codex/Codex CLI when `codex` is available on PATH, and registers Claude Code when `claude` is available on PATH.
+
+If Ollama is already running on `localhost:11434`, Hybrid setup reuses it and starts only Qdrant in Docker.
+
+To force local Ollama instead of the Docker Ollama image:
+
+```powershell
+.\scripts\setup.ps1 -Mode Hybrid -OllamaMode Local
+```
+
+In Hybrid mode, setup publishes `ragnet-mcp.exe` but does not leave it running. Start it with:
+
+```powershell
+.\artifacts\publish\win-x64\ragnet-mcp\ragnet-mcp.exe
+```
+
+See [SETUP.md](SETUP.md) for the full setup, verification, indexing, and troubleshooting flow.
 
 ## MCP Tools
 
@@ -174,14 +190,14 @@ Visual Studio registration is repo-local:
   "servers": [
     {
       "name": "ragnet-mcp",
-      "transport": "sse",
+      "transport": "http",
       "url": "http://localhost:7331/ragnet-mcp"
     }
   ]
 }
 ```
 
-This is written to `.mcp.json`.
+This is written to `.mcp.json` and uses streamable HTTP.
 
 ## VS Code and GitHub Copilot
 
@@ -199,6 +215,38 @@ VS Code registration is repo-local:
 ```
 
 This is written to `.vscode/mcp.json`.
+
+## Codex and Codex CLI
+
+Codex registration is user-local and uses the installed CLI:
+
+```powershell
+.\scripts\register-codex.ps1
+```
+
+This runs:
+
+```powershell
+codex mcp add ragnet-mcp --url http://localhost:7331/ragnet-mcp
+```
+
+Codex stores the MCP server in `$HOME\.codex\config.toml`, which is shared by the Codex desktop app and Codex CLI. Restart Codex after registration if the server is not discovered immediately.
+
+## Claude Code
+
+Claude Code registration is user-local by default and uses the installed CLI:
+
+```powershell
+.\scripts\register-claude.ps1
+```
+
+This runs:
+
+```powershell
+claude mcp add --scope user --transport http ragnet-mcp http://localhost:7331/ragnet-mcp
+```
+
+Use `-Scope local` or `-Scope project` when you want Claude Code registration scoped differently. Restart Claude Code after registration if the server is not discovered immediately.
 
 ## Native Publish
 
