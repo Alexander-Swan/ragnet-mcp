@@ -1,0 +1,37 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+
+  ragnet-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ragnet-mcp
+    depends_on:
+      - qdrant
+      - ollama
+    ports:
+      - "7331:7331"
+    environment:
+      ASPNETCORE_URLS: http://+:7331
+      RagNet__Qdrant__BaseUrl: http://qdrant:6333
+      RagNet__Ollama__BaseUrl: http://ollama:11434
+      RagNet__Ollama__EmbeddingModel: mxbai-embed-large
+
+volumes:
+  qdrant_storage:
+  ollama:

@@ -1,0 +1,9 @@
+{
+  "servers": [
+    {
+      "name": "ragnet-mcp",
+      "transport": "sse",
+      "url": "http://localhost:7331/ragnet-mcp"
+    }
+  ]
+}

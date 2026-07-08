@@ -1,0 +1,7 @@
+**/bin/
+**/obj/
+.dotnet-home/
+.git/
+.vs/
+.vscode/
+*.user

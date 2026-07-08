@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>ragnet-mcp-dev</UserSecretsId>
+    <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+    <AssemblyName>ragnet-mcp</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="1.4.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RagNet.Analysis\RagNet.Analysis.csproj" />
+    <ProjectReference Include="..\RagNet.Core\RagNet.Core.csproj" />
+    <ProjectReference Include="..\RagNet.Infrastructure\RagNet.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Analyzers\**\*.cs" />
+    <Compile Remove="Configuration\**\*.cs" />
+    <Compile Remove="Embeddings\**\*.cs" />
+    <Compile Remove="Indexing\**\*.cs" />
+    <Compile Remove="Storage\**\*.cs" />
+    <Compile Remove="Workspace\**\*.cs" />
+  </ItemGroup>
+
+</Project>
