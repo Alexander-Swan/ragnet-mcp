@@ -2,6 +2,7 @@ using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 using RagNet.Mcp.Analyzers;
 using RagNet.Mcp.Analyzers.Interfaces;
 using RagNet.Mcp.Configuration;
@@ -28,6 +29,20 @@ public sealed class WorkspaceIndexer(
 {
     private const string IndexSchemaVersion = "ragnet-index-v2/analyzers-v8";
     private const int SearchCandidateMultiplier = 5;
+    private static readonly Regex SolutionProjectRegex = new(
+        "^Project\\(\"\\{[^}]+\\}\"\\)\\s*=\\s*\"[^\"]+\",\\s*\"([^\"]+)\"",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex SlnxProjectRegex = new(
+        "(?:Path|path|File|file)\\s*=\\s*\"([^\"]+\\.csproj)\"|\"([^\"]+\\.csproj)\"",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly HashSet<string> SharedDotNetMetadataFiles = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Directory.Build.props",
+        "Directory.Build.targets",
+        "Directory.Packages.props",
+        "global.json",
+        "NuGet.config"
+    };
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> IndexLocks = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly IReadOnlyList<ICodeAnalyzer> _analyzers = analyzers.ToArray();
@@ -40,35 +55,67 @@ public sealed class WorkspaceIndexer(
         string? indexProfile = null,
         CancellationToken cancellationToken = default,
         IProgress<IndexingProgress>? progress = null)
-    {
-        var normalizedIndexProfile = IndexProfiles.Normalize(indexProfile);
-        var workspace = await workspaceDetector.DetectAsync(workspacePath, cancellationToken);
-        EnsureAllowedWorkspaceRoot(workspace.RootPath);
-        var workspaceRoot = NormalizePath(workspace.RootPath);
-        Report(progress, workspaceRoot, IndexingProgressStage.Starting, 0, null, "Preparing workspace index.");
-        var indexLock = IndexLocks.GetOrAdd(workspaceRoot, _ => new SemaphoreSlim(1, 1));
-        await indexLock.WaitAsync(cancellationToken);
+        => (await IndexTargetsAsync([workspacePath], excludeDirectories, force, indexProfile, cancellationToken, progress))[0];
 
-        try
+    public async Task<IReadOnlyList<IndexWorkspaceResult>> IndexTargetsAsync(
+        IReadOnlyList<string> workspacePaths,
+        IReadOnlyList<string>? excludeDirectories = null,
+        bool force = false,
+        string? indexProfile = null,
+        CancellationToken cancellationToken = default,
+        IProgress<IndexingProgress>? progress = null)
+    {
+        if (workspacePaths.Count == 0)
         {
-            return await IndexLockedAsync(workspaceRoot, excludeDirectories, force, normalizedIndexProfile, cancellationToken, progress);
+            throw new ArgumentException("At least one workspace target is required.", nameof(workspacePaths));
         }
-        finally
+
+        var normalizedIndexProfile = IndexProfiles.Normalize(indexProfile);
+        var plans = new Dictionary<string, WorkspaceIndexTargetPlan>(StringComparer.OrdinalIgnoreCase);
+        foreach (var workspacePath in workspacePaths)
         {
-            indexLock.Release();
+            cancellationToken.ThrowIfCancellationRequested();
+            var targetPlan = await CreateTargetPlanAsync(workspacePath, excludeDirectories, cancellationToken);
+            if (plans.TryGetValue(targetPlan.WorkspaceRoot, out var existing))
+            {
+                plans[targetPlan.WorkspaceRoot] = existing.Merge(targetPlan);
+            }
+            else
+            {
+                plans[targetPlan.WorkspaceRoot] = targetPlan;
+            }
         }
+
+        var results = new List<IndexWorkspaceResult>();
+        foreach (var plan in plans.Values)
+        {
+            Report(progress, plan.WorkspaceRoot, IndexingProgressStage.Starting, 0, null, "Preparing workspace index.");
+            var indexLock = IndexLocks.GetOrAdd(plan.WorkspaceRoot, _ => new SemaphoreSlim(1, 1));
+            await indexLock.WaitAsync(cancellationToken);
+
+            try
+            {
+                results.Add(await IndexLockedAsync(plan, force, normalizedIndexProfile, cancellationToken, progress));
+            }
+            finally
+            {
+                indexLock.Release();
+            }
+        }
+
+        return results;
     }
 
     private async Task<IndexWorkspaceResult> IndexLockedAsync(
-        string workspaceRoot,
-        IReadOnlyList<string>? excludeDirectories,
+        WorkspaceIndexTargetPlan targetPlan,
         bool force,
         string indexProfile,
         CancellationToken cancellationToken,
         IProgress<IndexingProgress>? progress)
     {
         var warnings = new List<string>();
-        var files = EnumerateFiles(workspaceRoot, excludeDirectories).ToArray();
+        var workspaceRoot = targetPlan.WorkspaceRoot;
+        var files = targetPlan.EnumerateFiles().ToArray();
         var profileFiles = files
             .Where(file => FileMatchesProfile(file, indexProfile))
             .ToArray();
@@ -99,10 +146,12 @@ public sealed class WorkspaceIndexer(
         var previousState = await indexStateStore.LoadAsync(workspaceRoot, cancellationToken);
         var stateCompatible = IsStateCompatible(previousState);
         var profileScoped = indexProfile != IndexProfiles.All;
+        var targetScoped = !targetPlan.IsFullWorkspace;
+        var mergeScopedState = profileScoped || targetScoped;
         var fullReindex = force || !stateCompatible;
         if (force)
         {
-            warnings.Add(profileScoped
+            warnings.Add(mergeScopedState
                 ? $"Forced reindex requested for profile '{indexProfile}'."
                 : "Forced full reindex requested.");
         }
@@ -111,14 +160,14 @@ public sealed class WorkspaceIndexer(
             warnings.Add("Index state metadata changed or was missing; full reindex required.");
         }
 
-        if (fullReindex && !profileScoped)
+        if (fullReindex && !mergeScopedState)
         {
             await vectorStore.DeleteWorkspaceAsync(workspaceRoot, cancellationToken);
             previousState = EmptyState(workspaceRoot);
         }
         else if (!stateCompatible)
         {
-            throw new InvalidOperationException("Profile-scoped indexing requires a compatible existing index state. Run an all-profile reindex first.");
+            throw new InvalidOperationException("Scoped indexing requires a compatible existing index state. Run a full workspace reindex first.");
         }
 
         var changedFiles = currentFiles.Values
@@ -128,7 +177,9 @@ public sealed class WorkspaceIndexer(
             .Select(file => file.FilePath)
             .ToArray();
         var deletedFiles = previousState.Files.Keys
-            .Where(file => FileMatchesProfile(file, indexProfile) && !currentFiles.ContainsKey(file))
+            .Where(file => FileMatchesProfile(file, indexProfile) &&
+                targetPlan.CanDeleteMissingFile(file) &&
+                !currentFiles.ContainsKey(file))
             .ToArray();
         var chunks = new List<CodeChunk>();
         var workspaceSourceIdentity = await sourceIdentityResolver.ResolveAsync(workspaceRoot, workspaceRoot, cancellationToken);
@@ -208,9 +259,9 @@ public sealed class WorkspaceIndexer(
         }
 
         Report(progress, workspaceRoot, IndexingProgressStage.SavingState, 0, null, "Saving index state.");
-        var filesToSave = profileScoped
+        var filesToSave = mergeScopedState
             ? previousState.Files
-                .Where(file => !FileMatchesProfile(file.Key, indexProfile))
+                .Where(file => !FileMatchesProfile(file.Key, indexProfile) || !targetPlan.CanDeleteMissingFile(file.Key))
                 .Select(file => file.Value)
                 .Concat(currentFiles.Values)
                 .ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
@@ -236,22 +287,130 @@ public sealed class WorkspaceIndexer(
         CancellationToken cancellationToken = default,
         IProgress<IndexingProgress>? progress = null)
     {
-        var workspaces = await workspaceScopeResolver.ResolveAsync(
-            filePath: null,
-            scope: "named_workspace_group",
-            workspaceRoot: null,
-            workspaceGroup: workspaceGroup,
-            cancellationToken);
-        var groupExcludes = GetWorkspaceGroupExcludes(workspaceGroup, excludeDirectories);
-
-        var results = new List<IndexWorkspaceResult>();
-        foreach (var workspace in workspaces)
+        var group = _options.WorkspaceGroups.FirstOrDefault(candidate =>
+            string.Equals(candidate.Name, workspaceGroup, StringComparison.OrdinalIgnoreCase));
+        if (group is null)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            results.Add(await IndexAsync(workspace.RootPath, groupExcludes, force, indexProfile, cancellationToken, progress));
+            await workspaceScopeResolver.ResolveAsync(
+                filePath: null,
+                scope: "named_workspace_group",
+                workspaceRoot: null,
+                workspaceGroup: workspaceGroup,
+                cancellationToken);
         }
 
-        return results;
+        var groupExcludes = GetWorkspaceGroupExcludes(workspaceGroup, excludeDirectories);
+
+        return await IndexTargetsAsync(
+            group?.Roots ?? [],
+            groupExcludes,
+            force,
+            indexProfile,
+            cancellationToken,
+            progress);
+    }
+
+    private async Task<WorkspaceIndexTargetPlan> CreateTargetPlanAsync(
+        string workspacePath,
+        IReadOnlyList<string>? excludeDirectories,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(workspacePath))
+        {
+            throw new ArgumentException("Workspace target cannot be empty.", nameof(workspacePath));
+        }
+
+        var workspace = await workspaceDetector.DetectAsync(workspacePath, cancellationToken);
+        EnsureAllowedWorkspaceRoot(workspace.RootPath);
+        var workspaceRoot = NormalizePath(workspace.RootPath);
+        var fullPath = NormalizePath(workspacePath);
+        EnsureAllowedPath(fullPath);
+
+        if (Directory.Exists(fullPath))
+        {
+            if (string.Equals(fullPath, workspaceRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                return WorkspaceIndexTargetPlan.FullWorkspace(
+                    workspaceRoot,
+                    EnumerateFiles(workspaceRoot, workspaceRoot, excludeDirectories).ToArray());
+            }
+
+            EnsurePathUnderWorkspace(fullPath, workspaceRoot);
+            return WorkspaceIndexTargetPlan.Scoped(
+                workspaceRoot,
+                EnumerateFiles(workspaceRoot, fullPath, excludeDirectories).ToArray(),
+                deleteRoots: [fullPath],
+                deleteFiles: []);
+        }
+
+        if (!File.Exists(fullPath))
+        {
+            throw new FileNotFoundException($"Workspace target '{fullPath}' does not exist.", fullPath);
+        }
+
+        EnsurePathUnderWorkspace(fullPath, workspaceRoot);
+        if (IsSolutionPath(fullPath))
+        {
+            return CreateSolutionTargetPlan(workspaceRoot, fullPath, excludeDirectories, cancellationToken);
+        }
+
+        var fileExcludePatterns = BuildFileExcludePatterns();
+        var files = _analyzers.Any(analyzer => analyzer.CanAnalyze(fullPath)) &&
+            !IsExcludedFile(workspaceRoot, fullPath, fileExcludePatterns)
+                ? new[] { fullPath }
+                : [];
+
+        return WorkspaceIndexTargetPlan.Scoped(
+            workspaceRoot,
+            files,
+            deleteRoots: [],
+            deleteFiles: [fullPath]);
+    }
+
+    private WorkspaceIndexTargetPlan CreateSolutionTargetPlan(
+        string workspaceRoot,
+        string solutionPath,
+        IReadOnlyList<string>? excludeDirectories,
+        CancellationToken cancellationToken)
+    {
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { solutionPath };
+        var deleteRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var deleteFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { solutionPath };
+        var projectPaths = ResolveSolutionProjects(solutionPath, cancellationToken);
+
+        foreach (var projectPath in projectPaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            EnsurePathUnderWorkspace(projectPath, workspaceRoot);
+            files.Add(projectPath);
+            deleteFiles.Add(projectPath);
+
+            var projectDirectory = NormalizePath(Path.GetDirectoryName(projectPath)!);
+            deleteRoots.Add(projectDirectory);
+
+            foreach (var file in EnumerateFiles(workspaceRoot, projectDirectory, excludeDirectories))
+            {
+                files.Add(file);
+            }
+
+            foreach (var sharedMetadata in EnumerateSharedDotNetMetadata(workspaceRoot, projectDirectory))
+            {
+                files.Add(sharedMetadata);
+                deleteFiles.Add(sharedMetadata);
+            }
+        }
+
+        foreach (var sharedMetadata in EnumerateSharedDotNetMetadata(workspaceRoot, Path.GetDirectoryName(solutionPath)!))
+        {
+            files.Add(sharedMetadata);
+            deleteFiles.Add(sharedMetadata);
+        }
+
+        return WorkspaceIndexTargetPlan.Scoped(
+            workspaceRoot,
+            files.Where(file => _analyzers.Any(analyzer => analyzer.CanAnalyze(file))).ToArray(),
+            deleteRoots.ToArray(),
+            deleteFiles.ToArray());
     }
 
     public async Task<IndexStatusResult> GetStatusAsync(
@@ -358,12 +517,12 @@ public sealed class WorkspaceIndexer(
         return chunks.FirstOrDefault(chunk => string.Equals(chunk.SymbolName, symbolName, StringComparison.OrdinalIgnoreCase))?.Content;
     }
 
-    private IEnumerable<string> EnumerateFiles(string rootPath, IReadOnlyList<string>? excludeDirectories)
+    private IEnumerable<string> EnumerateFiles(string rootPath, string scanRootPath, IReadOnlyList<string>? excludeDirectories)
     {
         var excluded = BuildExcludeSet(excludeDirectories);
         var fileExcludePatterns = BuildFileExcludePatterns();
         var pending = new Stack<string>();
-        pending.Push(rootPath);
+        pending.Push(scanRootPath);
 
         while (pending.Count > 0)
         {
@@ -396,6 +555,107 @@ public sealed class WorkspaceIndexer(
                     yield return file;
                 }
             }
+        }
+    }
+
+    private IReadOnlyList<string> ResolveSolutionProjects(string solutionPath, CancellationToken cancellationToken)
+    {
+        var projects = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var pending = new Queue<string>(ReadProjectsFromSolution(solutionPath));
+
+        while (pending.Count > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var projectPath = pending.Dequeue();
+            if (!projects.Add(projectPath))
+            {
+                continue;
+            }
+
+            foreach (var reference in ReadProjectReferences(projectPath))
+            {
+                pending.Enqueue(reference);
+            }
+        }
+
+        return projects.ToArray();
+    }
+
+    private static IReadOnlyList<string> ReadProjectsFromSolution(string solutionPath)
+    {
+        var solutionDirectory = Path.GetDirectoryName(solutionPath)!;
+        var extension = Path.GetExtension(solutionPath);
+        var projects = new List<string>();
+
+        foreach (var line in File.ReadLines(solutionPath))
+        {
+            var matches = string.Equals(extension, ".slnx", StringComparison.OrdinalIgnoreCase)
+                ? SlnxProjectRegex.Matches(line).Select(match => match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value)
+                : SolutionProjectRegex.Matches(line).Select(match => match.Groups[1].Value);
+
+            foreach (var project in matches)
+            {
+                if (!project.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var projectPath = NormalizePath(Path.Combine(solutionDirectory, project));
+                if (File.Exists(projectPath))
+                {
+                    projects.Add(projectPath);
+                }
+            }
+        }
+
+        return projects.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static IReadOnlyList<string> ReadProjectReferences(string projectPath)
+    {
+        try
+        {
+            var projectDirectory = Path.GetDirectoryName(projectPath)!;
+            var document = XDocument.Load(projectPath, LoadOptions.None);
+            return document
+                .Descendants()
+                .Where(element => string.Equals(element.Name.LocalName, "ProjectReference", StringComparison.OrdinalIgnoreCase))
+                .Select(element => element.Attribute("Include")?.Value)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => NormalizePath(Path.Combine(projectDirectory, value!)))
+                .Where(File.Exists)
+                .Where(value => string.Equals(Path.GetExtension(value), ".csproj", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Xml.XmlException)
+        {
+            return [];
+        }
+    }
+
+    private static IEnumerable<string> EnumerateSharedDotNetMetadata(string workspaceRoot, string startDirectory)
+    {
+        var root = NormalizePath(workspaceRoot);
+        var cursor = new DirectoryInfo(NormalizePath(startDirectory));
+
+        while (cursor is not null)
+        {
+            foreach (var fileName in SharedDotNetMetadataFiles)
+            {
+                var filePath = Path.Combine(cursor.FullName, fileName);
+                if (File.Exists(filePath))
+                {
+                    yield return NormalizePath(filePath);
+                }
+            }
+
+            if (string.Equals(NormalizePath(cursor.FullName), root, StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+
+            cursor = cursor.Parent;
         }
     }
 
@@ -688,6 +948,13 @@ public sealed class WorkspaceIndexer(
         return IndexedContentTypes.Code;
     }
 
+    private static bool IsSolutionPath(string filePath)
+    {
+        var extension = Path.GetExtension(filePath);
+        return string.Equals(extension, ".sln", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(extension, ".slnx", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool IsProjectMetadataPath(string filePath)
     {
         var fileName = Path.GetFileName(filePath);
@@ -742,6 +1009,14 @@ public sealed class WorkspaceIndexer(
     private void EnsureAllowedWorkspaceRoot(string workspaceRoot)
         => EnsureAllowedPath(workspaceRoot);
 
+    private static void EnsurePathUnderWorkspace(string path, string workspaceRoot)
+    {
+        if (!IsPathUnderRoot(NormalizePath(path), NormalizePath(workspaceRoot)))
+        {
+            throw new InvalidOperationException($"Workspace target '{path}' is outside detected workspace root '{workspaceRoot}'.");
+        }
+    }
+
     private void EnsureAllowedPath(string path)
     {
         if (_options.Workspace.AllowedPaths.Count == 0)
@@ -792,4 +1067,69 @@ public sealed class WorkspaceIndexer(
         int? total,
         string message)
         => progress?.Report(new IndexingProgress(workspaceRoot, stage, current, total, message));
+
+    private sealed record WorkspaceIndexTargetPlan(
+        string WorkspaceRoot,
+        bool IsFullWorkspace,
+        IReadOnlyList<string> Files,
+        IReadOnlyList<string> DeleteRoots,
+        IReadOnlyList<string> DeleteFiles)
+    {
+        public static WorkspaceIndexTargetPlan FullWorkspace(string workspaceRoot, IReadOnlyList<string> files)
+            => new(workspaceRoot, true, NormalizeDistinct(files), [workspaceRoot], []);
+
+        public static WorkspaceIndexTargetPlan Scoped(
+            string workspaceRoot,
+            IReadOnlyList<string> files,
+            IReadOnlyList<string> deleteRoots,
+            IReadOnlyList<string> deleteFiles)
+            => new(
+                workspaceRoot,
+                false,
+                NormalizeDistinct(files),
+                NormalizeDistinct(deleteRoots),
+                NormalizeDistinct(deleteFiles));
+
+        public WorkspaceIndexTargetPlan Merge(WorkspaceIndexTargetPlan other)
+        {
+            if (!string.Equals(WorkspaceRoot, other.WorkspaceRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Cannot merge index target plans from different workspace roots.");
+            }
+
+            if (IsFullWorkspace)
+            {
+                return this;
+            }
+
+            if (other.IsFullWorkspace)
+            {
+                return other;
+            }
+
+            return Scoped(
+                WorkspaceRoot,
+                Files.Concat(other.Files).ToArray(),
+                DeleteRoots.Concat(other.DeleteRoots).ToArray(),
+                DeleteFiles.Concat(other.DeleteFiles).ToArray());
+        }
+
+        public IEnumerable<string> EnumerateFiles()
+            => Files;
+
+        public bool CanDeleteMissingFile(string filePath)
+        {
+            var normalized = NormalizePath(filePath);
+            return IsFullWorkspace ||
+                DeleteFiles.Any(file => string.Equals(file, normalized, StringComparison.OrdinalIgnoreCase)) ||
+                DeleteRoots.Any(root => IsPathUnderRoot(normalized, root));
+        }
+
+        private static IReadOnlyList<string> NormalizeDistinct(IEnumerable<string> paths)
+            => paths
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Select(NormalizePath)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+    }
 }

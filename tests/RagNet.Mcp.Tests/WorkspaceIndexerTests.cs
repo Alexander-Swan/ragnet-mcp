@@ -132,7 +132,129 @@ public sealed class WorkspaceIndexerTests
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             indexer.IndexAsync(workspace.RootPath, indexProfile: IndexProfiles.Documentation));
 
-        Assert.Contains("Profile-scoped indexing requires a compatible existing index state", exception.Message);
+        Assert.Contains("Scoped indexing requires a compatible existing index state", exception.Message);
+    }
+
+    [Fact]
+    public async Task IndexAsync_DirectoryTargetScansOnlyDirectorySubtree()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var apiFile = workspace.WriteFile("Api/Program.cs", "api");
+        var webFile = workspace.WriteFile("Web/Program.cs", "web");
+        var stateStore = new FakeStateStore(State(workspace.RootPath));
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(workspace.RootPath, stateStore, new FakeVectorStore(), analyzer);
+
+        var result = await indexer.IndexAsync(Path.Combine(workspace.RootPath, "Api"));
+
+        Assert.Equal(1, result.FilesScanned);
+        Assert.Contains(Path.GetFullPath(apiFile), analyzer.AnalyzedFiles);
+        Assert.DoesNotContain(Path.GetFullPath(webFile), analyzer.AnalyzedFiles);
+    }
+
+    [Fact]
+    public async Task IndexAsync_SolutionTargetExcludesUnrelatedSiblingProject()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var solution = workspace.WriteFile(
+            "Product.sln",
+            """
+            Microsoft Visual Studio Solution File, Format Version 12.00
+            Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Api", "Api\Api.csproj", "{11111111-1111-1111-1111-111111111111}"
+            EndProject
+            """);
+        var apiProject = workspace.WriteFile("Api/Api.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        var apiFile = workspace.WriteFile("Api/Program.cs", "api");
+        var webProject = workspace.WriteFile("Web/Web.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        var webFile = workspace.WriteFile("Web/Program.cs", "web");
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(workspace.RootPath, new FakeStateStore(State(workspace.RootPath)), new FakeVectorStore(), analyzer);
+
+        var result = await indexer.IndexAsync(solution);
+
+        Assert.Equal(3, result.FilesScanned);
+        Assert.Contains(Path.GetFullPath(solution), analyzer.AnalyzedFiles);
+        Assert.Contains(Path.GetFullPath(apiProject), analyzer.AnalyzedFiles);
+        Assert.Contains(Path.GetFullPath(apiFile), analyzer.AnalyzedFiles);
+        Assert.DoesNotContain(Path.GetFullPath(webProject), analyzer.AnalyzedFiles);
+        Assert.DoesNotContain(Path.GetFullPath(webFile), analyzer.AnalyzedFiles);
+    }
+
+    [Fact]
+    public async Task IndexTargetsAsync_UnionsSolutionsDirectoriesAndFiles()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var apiSolution = workspace.WriteFile(
+            "Api.sln",
+            """
+            Microsoft Visual Studio Solution File, Format Version 12.00
+            Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Api", "Api\Api.csproj", "{11111111-1111-1111-1111-111111111111}"
+            EndProject
+            """);
+        var adminSolution = workspace.WriteFile(
+            "Admin.sln",
+            """
+            Microsoft Visual Studio Solution File, Format Version 12.00
+            Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Admin", "Admin\Admin.csproj", "{22222222-2222-2222-2222-222222222222}"
+            EndProject
+            """);
+        var apiFile = workspace.WriteFile("Api/Program.cs", "api");
+        var adminFile = workspace.WriteFile("Admin/Program.cs", "admin");
+        var docsFile = workspace.WriteFile("docs/guide.md", "docs");
+        var explicitFile = workspace.WriteFile("Shared/Shared.cs", "shared");
+        var unrelatedFile = workspace.WriteFile("Experimental/Program.cs", "experiment");
+        workspace.WriteFile("Api/Api.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        workspace.WriteFile("Admin/Admin.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(workspace.RootPath, new FakeStateStore(State(workspace.RootPath)), new FakeVectorStore(), analyzer);
+
+        var results = await indexer.IndexTargetsAsync(
+        [
+            apiSolution,
+            adminSolution,
+            Path.Combine(workspace.RootPath, "docs"),
+            explicitFile
+        ]);
+
+        Assert.Single(results);
+        Assert.Contains(Path.GetFullPath(apiFile), analyzer.AnalyzedFiles);
+        Assert.Contains(Path.GetFullPath(adminFile), analyzer.AnalyzedFiles);
+        Assert.Contains(Path.GetFullPath(docsFile), analyzer.AnalyzedFiles);
+        Assert.Contains(Path.GetFullPath(explicitFile), analyzer.AnalyzedFiles);
+        Assert.DoesNotContain(Path.GetFullPath(unrelatedFile), analyzer.AnalyzedFiles);
+    }
+
+    [Fact]
+    public async Task IndexAsync_ScopedRunPreservesUnrelatedPreviousState()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var solution = workspace.WriteFile(
+            "Product.sln",
+            """
+            Microsoft Visual Studio Solution File, Format Version 12.00
+            Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Api", "Api\Api.csproj", "{11111111-1111-1111-1111-111111111111}"
+            EndProject
+            """);
+        workspace.WriteFile("Api/Api.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        var changedApiFile = workspace.WriteFile("Api/Program.cs", "api v2");
+        var removedApiFile = Path.Combine(workspace.RootPath, "Api", "Removed.cs");
+        var removedWebFile = Path.Combine(workspace.RootPath, "Web", "Removed.cs");
+        var stateStore = new FakeStateStore(State(
+            workspace.RootPath,
+            FileState(changedApiFile, fingerprint: "old-api-fingerprint"),
+            new IndexedFileState(Path.GetFullPath(removedApiFile), "removed-api", 10, DateTimeOffset.UtcNow),
+            new IndexedFileState(Path.GetFullPath(removedWebFile), "removed-web", 10, DateTimeOffset.UtcNow)));
+        var vectorStore = new FakeVectorStore();
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(workspace.RootPath, stateStore, vectorStore, analyzer);
+
+        await indexer.IndexAsync(solution);
+
+        Assert.Contains(Path.GetFullPath(changedApiFile), vectorStore.DeletedFiles);
+        Assert.Contains(Path.GetFullPath(removedApiFile), vectorStore.DeletedFiles);
+        Assert.DoesNotContain(Path.GetFullPath(removedWebFile), vectorStore.DeletedFiles);
+        Assert.Contains(Path.GetFullPath(removedWebFile), stateStore.SavedState!.Files.Keys);
+        Assert.DoesNotContain(Path.GetFullPath(removedApiFile), stateStore.SavedState.Files.Keys);
     }
 
     [Fact]
@@ -337,7 +459,7 @@ public sealed class WorkspaceIndexerTests
         public List<string> AnalyzedFiles { get; } = [];
 
         public bool CanAnalyze(string filePath)
-            => Path.GetExtension(filePath) is ".cs" or ".md";
+            => Path.GetExtension(filePath) is ".cs" or ".md" or ".sln" or ".csproj" or ".props" or ".targets" or ".config";
 
         public Task<IReadOnlyList<CodeChunk>> AnalyzeAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default)
         {
@@ -345,14 +467,21 @@ public sealed class WorkspaceIndexerTests
             AnalyzedFiles.Add(fullPath);
             var contentType = string.Equals(Path.GetExtension(fullPath), ".md", StringComparison.OrdinalIgnoreCase)
                 ? IndexedContentTypes.Documentation
-                : IndexedContentTypes.Code;
+                : Path.GetExtension(fullPath) is ".cs"
+                    ? IndexedContentTypes.Code
+                    : IndexedContentTypes.ProjectMetadata;
             return Task.FromResult<IReadOnlyList<CodeChunk>>(
             [
                 new CodeChunk(
                     $"{Path.GetRelativePath(workspaceRoot, fullPath)}:1:1:chunk",
                     workspaceRoot,
                     fullPath,
-                    contentType == IndexedContentTypes.Documentation ? "markdown" : "csharp",
+                    contentType switch
+                    {
+                        IndexedContentTypes.Documentation => "markdown",
+                        IndexedContentTypes.ProjectMetadata => "xml",
+                        _ => "csharp"
+                    },
                     Path.GetFileNameWithoutExtension(fullPath),
                     "File",
                     1,

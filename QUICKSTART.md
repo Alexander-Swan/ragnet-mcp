@@ -54,14 +54,23 @@ Expected response:
 
 Restart Visual Studio, VS Code, Codex, Codex CLI, or Claude Code if the MCP server is not discovered immediately. Open the agent chat and enable the `ragnet-mcp` server/tools if prompted.
 
-## 4. Index a Workspace
+## 4. Index Targets
 
-For normal local workspaces, run the local indexer:
+For normal local workspaces, run the local indexer. `--workspace`/`-w` accepts a workspace root, subdirectory, solution file, or supported file:
 
 ```powershell
-.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
-.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --profile docs
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln"
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --profile docs
+.\bin\ragnet-indexer.exe index -w "D:\Work\Product\Api\Api.sln" -w "D:\Work\Product\docs\api"
 .\bin\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
+```
+
+To index multiple local targets and save that set as a local group:
+
+```powershell
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --workspace "D:\Work\Product\Admin\Admin.sln" --group my-product
+.\bin\ragnet-indexer.exe index -w "D:\Work\Product\Worker" -g my-product -a
+.\bin\ragnet-indexer.exe index --group my-product
 ```
 
 Call the MCP indexing tool only for paths visible inside the `ragnet-mcp` container:
@@ -196,6 +205,8 @@ Planned inputs:
 
 These files should be indexed with metadata for target frameworks, package references, project references, SDK, nullable/implicit-usings settings, analyzers, source generators, build properties, and configuration keys.
 
+Solution-scoped indexing: pass a `.sln` or `.slnx` path as `--workspace`/`-w` to index only projects and files reachable from that solution instead of scanning every analyzable file under the workspace root. Repeated targets are unioned, so a product can index two solutions plus an explicit docs directory in one run.
+
 ## Planned Documentation Support
 
 RagNet should also index documentation as first-class RAG content.
@@ -218,4 +229,4 @@ RagNet is expected to support two indexing modes later:
 - Local mode: run a native `RagNet.Indexer` executable on the host so it can read local project directories without Docker mounts, while the web MCP/search service queries Qdrant.
 - Hosted/team mode: run the same indexing pipeline from CI or a webhook-triggered worker after GitHub/GitLab/Azure DevOps changes, then let teammates query the shared web search service.
 
-Git metadata should be used when available for repo roots, commit SHAs, and changed-file indexing, but filesystem-based indexing should still work without Git with reduced functionality.
+Git metadata should be used when available for repo roots, commit SHAs, and changed-file indexing, but filesystem-based indexing should still work without Git with reduced functionality. Planned Git-only local-change indexing should keep committed baseline chunks separate from staged/working-tree chunks, with retrieval controls to include, exclude, or prefer uncommitted local edits.

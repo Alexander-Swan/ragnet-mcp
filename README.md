@@ -96,13 +96,16 @@ The solution is split into logical assemblies:
 Agents can trigger indexing through the `trigger_indexing` MCP tool. Humans, scripts, CI jobs, and future webhook workers can run the same pipeline through `ragnet-indexer`:
 
 ```powershell
-.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
-.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --force
-.\bin\ragnet-indexer.exe index-group --group my-product
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln"
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --force
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --workspace "D:\Work\Product\Admin\Admin.sln" --group my-product
+.\bin\ragnet-indexer.exe index -w "D:\Work\Product\Api\Api.sln" -w "D:\Work\Product\docs\api"
+.\bin\ragnet-indexer.exe index -w "D:\Work\Product\Worker" -g my-product -a
+.\bin\ragnet-indexer.exe index --group my-product
 .\bin\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
 ```
 
-The CLI prints progress for each indexing phase to stderr and leaves the final JSON result on stdout for scripts. Pass `--no-progress` to suppress progress output.
+The CLI prints progress for each indexing phase to stderr and leaves the final JSON result on stdout for scripts. Pass `--no-progress` to suppress progress output. `--workspace`/`-w` is an index target: a workspace root, subdirectory, solution file, or supported file. Repeating it unions all compatible targets; for example, two solution files in the same repo index only those solution graphs, not unrelated sibling solutions. Pairing `--workspace` with `--group`/`-g` saves that target set to `.ragnet/indexer-workspace-groups.json` in the current directory, so future runs can use `index --group my-product`. Add `--add` or `-a` to append new targets to an existing local group instead of replacing it.
 
 The indexer is intended to run where source files are accessible: directly on a developer machine for local projects, or in CI/webhook workers after checking out a repository. The web MCP/search service remains HTTP-based and queries Qdrant.
 
@@ -114,6 +117,7 @@ RagNet should support both local-only and hosted/team usage without forcing the 
 - Split indexing into a reusable indexing pipeline plus a separate `RagNet.Indexer` executable/worker. Local mode should run this executable on the host so it can read local project files directly without mounting source folders into a container.
 - Cloud/team mode should run the same indexing pipeline in CI, a worker, or a webhook-triggered job that checks out the repository, performs incremental indexing, and writes vectors into shared Qdrant.
 - Prefer Git metadata when available: repository root, remote URL, branch, commit SHA, changed files, and deleted files. The system should still work without Git, but with reduced functionality based on filesystem scanning and content fingerprints.
+- Add Git-only support for indexing local uncommitted changes with clear separation from committed content. The committed baseline should be tagged with repository/branch/commit metadata, while working-tree and staged changes should be indexed as a local overlay tagged as uncommitted, machine-local, and branch-specific. Retrieval should be able to include, exclude, or prefer that overlay so an agent can distinguish checked-in code from local edits.
 - Add GitHub/GitLab/Azure DevOps-style change notifications later. Push/webhook events should enqueue incremental reindexing for affected repositories/workspaces instead of requiring a full scan every time.
 - Store enough source metadata in vector payloads for hosted search: repository URL, commit SHA, relative path, symbol details, line numbers, and chunk content. A cloud-hosted search service cannot read `D:\...` local files, so context must come from indexed payloads or a repo checkout/object store.
 - Keep full Docker indexing optional. Since `ragnet-mcp` runs in Docker by default, arbitrary host workspace paths should be indexed with the local indexer unless those paths are mounted or synced into the container.
@@ -202,6 +206,14 @@ Planned .NET project inputs:
 - Build and deployment helpers where relevant: Dockerfiles, compose files, CI workflow files, publish profiles, and deployment manifests
 
 These files should be chunked and indexed with metadata such as target frameworks, package references, project references, SDK, nullable/implicit-usings settings, analyzers, source generators, build properties, and configuration keys. This lets retrieval answer questions about dependencies, build behavior, project relationships, runtime configuration, and solution layout without relying only on source-code chunks.
+
+Solution-scoped indexing:
+
+- Passing a solution file as `--workspace`/`-w`, such as `-w Billing.sln`, indexes only projects, source files, markup, configuration, and project metadata reachable from that solution.
+- Solution targets resolve project references from the solution/project graph instead of scanning every analyzable file under the workspace root.
+- Keep documentation indexing configurable for solution scope: include docs explicitly attached to the solution/product, but avoid unrelated sibling docs by default.
+- Store the solution identity in chunk payloads so search can filter or boost results for a specific solution inside a larger repo.
+- Support incremental reindexing by tracking solution membership changes, project reference changes, and file fingerprints.
 
 ## Multi-Project Products
 

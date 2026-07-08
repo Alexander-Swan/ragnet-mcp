@@ -148,10 +148,19 @@ Pass:
 workspace_path = /workspace/Product/Api
 ```
 
-For normal local Windows paths like `D:\Work\Product\Api`, use the local indexer executable instead. The Docker MCP container cannot read arbitrary host paths unless you mount or sync them:
+For normal local Windows paths like `D:\Work\Product\Api`, use the local indexer executable instead. The Docker MCP container cannot read arbitrary host paths unless you mount or sync them. `--workspace`/`-w` is an index target and can point at a workspace root, subdirectory, solution file, or supported file:
 
 ```powershell
-.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln"
+.\bin\ragnet-indexer.exe index -w "D:\Work\Product\Api\Api.sln" -w "D:\Work\Product\docs\api"
+```
+
+Repeat `--workspace` to union multiple targets. Two solution files in the same repo index only those two solution graphs. Add `--group` to save that target set under a local group name for future runs:
+
+```powershell
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --workspace "D:\Work\Product\Admin\Admin.sln" --group my-product
+.\bin\ragnet-indexer.exe index -w "D:\Work\Product\Worker" -g my-product -a
+.\bin\ragnet-indexer.exe index --group my-product
 ```
 
 The indexer prints progress to stderr and writes the final JSON result to stdout. For quiet automation:
