@@ -7,6 +7,7 @@ using System.Xml.Linq;
 using RagNet.Mcp.Analyzers;
 using RagNet.Mcp.Analyzers.Interfaces;
 using RagNet.Mcp.Configuration;
+using RagNet.Mcp.Embeddings;
 using RagNet.Mcp.Embeddings.Interfaces;
 using RagNet.Mcp.Indexing.Interfaces;
 using RagNet.Mcp.Source.Interfaces;
@@ -266,6 +267,10 @@ public sealed class WorkspaceIndexer(
                         Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, current, chunks.Count, "Creating embeddings.");
                     }
                 }
+                catch (EmbeddingModelNotFoundException)
+                {
+                    throw;
+                }
                 catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException)
                 {
                     await EmbedBatchIndividuallyAsync(batch, chunks, results, warnings, warningLock, () =>
@@ -337,6 +342,10 @@ public sealed class WorkspaceIndexer(
             try
             {
                 AssignEmbeddingResult(item, await embeddingProvider.EmbedAsync(item.Content, cancellationToken), chunks, results);
+            }
+            catch (EmbeddingModelNotFoundException)
+            {
+                throw;
             }
             catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException)
             {
@@ -614,6 +623,7 @@ public sealed class WorkspaceIndexer(
             throw new ArgumentException("Workspace target cannot be empty.", nameof(workspacePath));
         }
 
+        workspacePath = await ResolveWorkspaceTargetPathAsync(workspacePath, cancellationToken);
         var workspace = await workspaceDetector.DetectAsync(workspacePath, cancellationToken);
         EnsureAllowedWorkspaceRoot(workspace.RootPath);
         var workspaceRoot = NormalizePath(workspace.RootPath);
@@ -1360,6 +1370,35 @@ public sealed class WorkspaceIndexer(
         return fullPath.Length == root?.Length
             ? fullPath
             : fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    private async Task<string> ResolveWorkspaceTargetPathAsync(string workspacePath, CancellationToken cancellationToken)
+    {
+        if (!IsWorkspaceNameAlias(workspacePath))
+        {
+            return workspacePath;
+        }
+
+        var workspaceName = workspacePath.Trim();
+        var matches = (await indexedWorkspaceRegistry.GetIndexedWorkspacesAsync(cancellationToken))
+            .Where(workspace => string.Equals(Path.GetFileName(NormalizePath(workspace.WorkspaceRoot)), workspaceName, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        return matches.Length switch
+        {
+            1 => matches[0].WorkspaceRoot,
+            0 => throw new InvalidOperationException($"Workspace '{workspaceName}' has not been indexed yet. Use a full path for the first index, then the workspace name can be used for incremental indexing."),
+            _ => throw new InvalidOperationException($"Workspace name '{workspaceName}' matches {matches.Length} indexed workspaces. Use a full path.")
+        };
+    }
+
+    private static bool IsWorkspaceNameAlias(string workspacePath)
+    {
+        var trimmed = workspacePath.Trim();
+        return !Path.IsPathFullyQualified(trimmed) &&
+            trimmed.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) < 0 &&
+            !Directory.Exists(trimmed) &&
+            !File.Exists(trimmed);
     }
 
     private static WorkspaceIndexState EmptyState(string workspaceRoot)

@@ -208,10 +208,11 @@ For normal local Windows paths like `D:\Work\Product\Api`, use the local indexer
 
 ```powershell
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln"
+.\bin\ragnet-indexer.exe index --current
 .\bin\ragnet-indexer.exe index -w "D:\Work\Product\Api\Api.sln" -w "D:\Work\Product\docs\api"
 ```
 
-Repeat `--workspace` to union multiple targets. Two solution files in the same repo index only those two solution graphs. Add `--group` to save that target set under a local group name for future runs:
+Use `--current` or `-c` to index the current directory. Repeat `--workspace` to union multiple targets. Two solution files in the same repo index only those two solution graphs. If no target is provided and the current directory is inside an already indexed workspace, the CLI reindexes that workspace incrementally. Add `--group` to save that target set under a local group name for future runs:
 
 ```powershell
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --workspace "D:\Work\Product\Admin\Admin.sln" --group my-product
@@ -232,9 +233,12 @@ List local indexer groups and indexed workspaces as tables, or remove them:
 ```powershell
 .\bin\ragnet-indexer.exe list groups
 .\bin\ragnet-indexer.exe list workspaces
+.\bin\ragnet-indexer.exe create group my-product -w Api -w Admin
 .\bin\ragnet-indexer.exe delete group my-product
 .\bin\ragnet-indexer.exe delete workspace "D:\Work\Product\Api"
 ```
+
+`create group <name>` creates or replaces a local group from workspaces that already exist in the Qdrant workspace registry. Use indexed workspace names from `list workspaces`, full indexed workspace roots, or `--current` when the current directory is inside an indexed workspace. Add `--add`/`-a` to append to an existing local group.
 
 Configured groups are listed as read-only. `delete workspace` removes the Qdrant vector collection, Qdrant registry record, and Qdrant index-state point.
 

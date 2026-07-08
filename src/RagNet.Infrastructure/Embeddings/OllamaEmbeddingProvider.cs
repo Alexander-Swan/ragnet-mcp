@@ -1,6 +1,8 @@
 using System.Net.Http.Json;
+using System.Net;
 using Microsoft.Extensions.Options;
 using RagNet.Mcp.Configuration;
+using RagNet.Mcp.Embeddings;
 using RagNet.Mcp.Embeddings.Interfaces;
 
 namespace RagNet.Mcp.Embeddings;
@@ -29,6 +31,15 @@ public sealed class OllamaEmbeddingProvider(HttpClient httpClient, IOptions<RagN
         if (!response.IsSuccessStatusCode)
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (response.StatusCode == HttpStatusCode.NotFound &&
+                body.Contains("model", StringComparison.OrdinalIgnoreCase) &&
+                body.Contains("not found", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new EmbeddingModelNotFoundException(
+                    _options.Ollama.EmbeddingModel,
+                    $"Ollama embedding model '{_options.Ollama.EmbeddingModel}' is not installed. Pull it with: ollama pull {_options.Ollama.EmbeddingModel}");
+            }
+
             throw new HttpRequestException(
                 $"Ollama embedding request failed with {(int)response.StatusCode} {response.ReasonPhrase}: {body}",
                 inner: null,

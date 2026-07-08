@@ -28,6 +28,21 @@ public sealed class OllamaEmbeddingProviderTests
         Assert.Equal(["first", "second"], request.RootElement.GetProperty("input").EnumerateArray().Select(value => value.GetString() ?? string.Empty).ToArray());
     }
 
+    [Fact]
+    public async Task EmbedBatchAsync_ModelNotFoundThrowsSpecificException()
+    {
+        using var handler = new FakeOllamaHandler(
+            """{"error":"model \"test-embed\" not found, try pulling it first"}""",
+            HttpStatusCode.NotFound);
+        var provider = CreateProvider(handler);
+
+        var exception = await Assert.ThrowsAsync<EmbeddingModelNotFoundException>(
+            () => provider.EmbedBatchAsync(["first"]));
+
+        Assert.Equal("test-embed", exception.Model);
+        Assert.Contains("ollama pull test-embed", exception.Message);
+    }
+
     private static OllamaEmbeddingProvider CreateProvider(FakeOllamaHandler handler)
         => new(
             new HttpClient(handler)
@@ -42,7 +57,9 @@ public sealed class OllamaEmbeddingProviderTests
                 }
             }));
 
-    private sealed class FakeOllamaHandler(string responseBody) : HttpMessageHandler
+    private sealed class FakeOllamaHandler(
+        string responseBody,
+        HttpStatusCode statusCode = HttpStatusCode.OK) : HttpMessageHandler
     {
         public string Method { get; private set; } = string.Empty;
 
@@ -58,7 +75,7 @@ public sealed class OllamaEmbeddingProviderTests
                 ? string.Empty
                 : await request.Content.ReadAsStringAsync(cancellationToken);
 
-            return new HttpResponseMessage(HttpStatusCode.OK)
+            return new HttpResponseMessage(statusCode)
             {
                 Content = new StringContent(responseBody, Encoding.UTF8, "application/json")
             };

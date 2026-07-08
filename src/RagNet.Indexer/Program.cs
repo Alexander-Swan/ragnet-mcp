@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RagNet.Mcp.Composition;
 using RagNet.Mcp.Configuration;
+using RagNet.Mcp.Embeddings;
 using RagNet.Mcp.Indexing;
 using RagNet.Mcp.Indexing.Interfaces;
 using RagNet.Mcp.Storage.Interfaces;
@@ -36,6 +37,14 @@ try
 catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
 {
     Console.Error.WriteLine($"Error: {ex.Message}");
+    return 1;
+}
+catch (EmbeddingModelNotFoundException ex)
+{
+    Console.Error.WriteLine($"Error: Ollama embedding model '{ex.Model}' is not installed.");
+    Console.Error.WriteLine($"Ollama: {ragNetOptions.Ollama.BaseUrl}");
+    Console.Error.WriteLine($"Run: ollama pull {ex.Model}");
+    Console.Error.WriteLine(@"Or rerun setup: .\scripts\setup.ps1 -Mode Hybrid");
     return 1;
 }
 catch (HttpRequestException ex)
@@ -123,7 +132,7 @@ static async Task<int> RunAsync(
     {
         case "index":
         {
-            var workspaces = GetMany(options, "workspace") ?? [];
+            var workspaces = await ResolveIndexWorkspaceTargetsAsync(options, workspaceRegistry);
             var group = GetString(options, "group");
             var dryRun = GetBool(options, "dry-run");
             if (workspaces.Count == 0 && !string.IsNullOrWhiteSpace(group))
@@ -142,12 +151,12 @@ static async Task<int> RunAsync(
 
             if (workspaces.Count == 0)
             {
-                throw new ArgumentException("--workspace or --group is required for index.");
+                throw new ArgumentException("--workspace, --group, or --current is required for first indexing. If the current workspace has already been indexed, running index without a target will reindex it incrementally.");
             }
 
             if (!dryRun && !string.IsNullOrWhiteSpace(group))
             {
-                SaveLocalWorkspaceGroup(group, workspaces, GetBool(options, "add"));
+                await SaveLocalWorkspaceGroupAsync(group, workspaces, GetBool(options, "add"), workspaceRegistry);
             }
 
             var indexProfile = GetString(options, "profile") ?? GetString(options, "index-profile");
@@ -231,6 +240,27 @@ static async Task<int> RunAsync(
             }
         }
 
+        case "create":
+        {
+            var target = RequiredListTarget(args);
+            switch (target)
+            {
+                case "group":
+                case "groups":
+                    var groupName = GetCommandSubject(args, options, "group");
+                    var targets = await ResolveGroupWorkspaceTargetsAsync(options, workspaceRegistry);
+                    Console.WriteLine(JsonSerializer.Serialize(await SaveLocalWorkspaceGroupAsync(
+                        groupName,
+                        targets,
+                        GetBool(options, "add"),
+                        workspaceRegistry), jsonOptions));
+                    return 0;
+
+                default:
+                    throw new ArgumentException("Create target must be: group.");
+            }
+        }
+
         default:
             Console.Error.WriteLine($"Unknown command '{command}'.");
             WriteHelp();
@@ -245,7 +275,7 @@ static int GetOptionStart(string command, string[] args)
         return 2;
     }
 
-    if (command == "delete")
+    if (command is "delete" or "create")
     {
         return args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal)
             ? 3
@@ -266,6 +296,9 @@ static string RequiredListTarget(string[] args)
 }
 
 static string GetDeleteSubject(string[] args, Dictionary<string, List<string>> options, string optionName)
+    => GetCommandSubject(args, options, optionName);
+
+static string GetCommandSubject(string[] args, Dictionary<string, List<string>> options, string optionName)
 {
     if (args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(args[2]))
     {
@@ -329,6 +362,7 @@ static string NormalizeOptionName(string name)
     => name switch
     {
         "w" => "workspace",
+        "c" => "current",
         "g" => "group",
         "a" => "add",
         "p" => "profile",
@@ -357,6 +391,103 @@ static bool GetBool(Dictionary<string, List<string>> options, string name)
 
 static bool IsHelp(string value)
     => value is "-h" or "--help" or "help";
+
+static async Task<IReadOnlyList<string>> ResolveIndexWorkspaceTargetsAsync(
+    Dictionary<string, List<string>> options,
+    IIndexedWorkspaceRegistry workspaceRegistry)
+{
+    var targets = (GetMany(options, "workspace") ?? []).ToList();
+    var currentDirectory = NormalizePath(Directory.GetCurrentDirectory());
+    if (GetBool(options, "current"))
+    {
+        targets.Add(currentDirectory);
+    }
+
+    if (targets.Count > 0)
+    {
+        return targets
+            .Where(target => !string.IsNullOrWhiteSpace(target))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    var currentWorkspace = await TryGetIndexedWorkspaceForCurrentDirectoryAsync(workspaceRegistry);
+    return currentWorkspace is null
+        ? []
+        : [currentWorkspace.WorkspaceRoot];
+}
+
+static async Task<IndexedWorkspaceRecord?> TryGetIndexedWorkspaceForCurrentDirectoryAsync(IIndexedWorkspaceRegistry workspaceRegistry)
+{
+    var currentDirectory = NormalizePath(Directory.GetCurrentDirectory());
+    return (await workspaceRegistry.GetIndexedWorkspacesAsync())
+        .Where(workspace => IsPathWithinWorkspace(currentDirectory, NormalizePath(workspace.WorkspaceRoot)))
+        .OrderByDescending(workspace => NormalizePath(workspace.WorkspaceRoot).Length)
+        .FirstOrDefault();
+}
+
+static bool IsPathWithinWorkspace(string path, string workspaceRoot)
+    => string.Equals(path, workspaceRoot, StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith(workspaceRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith(workspaceRoot + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+static async Task<IReadOnlyList<string>> ResolveGroupWorkspaceTargetsAsync(
+    Dictionary<string, List<string>> options,
+    IIndexedWorkspaceRegistry workspaceRegistry)
+{
+    var requestedTargets = (GetMany(options, "workspace") ?? []).ToList();
+    if (GetBool(options, "current"))
+    {
+        var currentWorkspace = await TryGetIndexedWorkspaceForCurrentDirectoryAsync(workspaceRegistry)
+            ?? throw new InvalidOperationException("The current directory is not inside an indexed workspace. Index it first or pass an indexed workspace name/root.");
+        requestedTargets.Add(currentWorkspace.WorkspaceRoot);
+    }
+
+    if (requestedTargets.Count == 0)
+    {
+        throw new ArgumentException("--workspace or --current is required when creating a group from indexed workspaces.");
+    }
+
+    var indexedWorkspaces = await workspaceRegistry.GetIndexedWorkspacesAsync();
+    return requestedTargets
+        .Select(target => ResolveIndexedWorkspaceTarget(target, indexedWorkspaces))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+}
+
+static string ResolveIndexedWorkspaceTarget(string target, IReadOnlyList<IndexedWorkspaceRecord> indexedWorkspaces)
+{
+    var trimmed = target.Trim();
+    if (string.IsNullOrWhiteSpace(trimmed))
+    {
+        throw new ArgumentException("Workspace target cannot be empty.");
+    }
+
+    IndexedWorkspaceRecord[] matches;
+    if (!Path.IsPathFullyQualified(trimmed) &&
+        trimmed.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) < 0 &&
+        !Directory.Exists(trimmed) &&
+        !File.Exists(trimmed))
+    {
+        matches = indexedWorkspaces
+            .Where(workspace => string.Equals(Path.GetFileName(NormalizePath(workspace.WorkspaceRoot)), trimmed, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+    }
+    else
+    {
+        var fullPath = NormalizePath(trimmed);
+        matches = indexedWorkspaces
+            .Where(workspace => string.Equals(NormalizePath(workspace.WorkspaceRoot), fullPath, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+    }
+
+    return matches.Length switch
+    {
+        1 => matches[0].WorkspaceRoot,
+        0 => throw new InvalidOperationException($"Indexed workspace '{trimmed}' was not found. Use 'list workspaces' to see available workspaces."),
+        _ => throw new InvalidOperationException($"Workspace name '{trimmed}' matches {matches.Length} indexed workspaces. Use a full workspace root.")
+    };
+}
 
 static async Task<IReadOnlyList<IndexWorkspaceResult>> IndexGroupAsync(
     IWorkspaceIndexer indexer,
@@ -549,14 +680,22 @@ static IReadOnlyList<LocalWorkspaceGroup> LoadLocalWorkspaceGroups()
         .ToArray();
 }
 
-static void SaveLocalWorkspaceGroup(string group, IReadOnlyList<string> workspaces, bool add)
+static async Task<CreateWorkspaceGroupResult> SaveLocalWorkspaceGroupAsync(
+    string group,
+    IReadOnlyList<string> workspaces,
+    bool add,
+    IIndexedWorkspaceRegistry workspaceRegistry)
 {
-    var roots = workspaces
-        .Where(workspace => !string.IsNullOrWhiteSpace(workspace))
-        .Select(Path.GetFullPath)
+    var roots = new List<string>();
+    foreach (var workspace in workspaces.Where(workspace => !string.IsNullOrWhiteSpace(workspace)))
+    {
+        roots.Add(await ResolveLocalWorkspaceTargetPathAsync(workspace, workspaceRegistry));
+    }
+
+    var normalizedRoots = roots
         .Distinct(StringComparer.OrdinalIgnoreCase)
         .ToArray();
-    if (roots.Length == 0)
+    if (normalizedRoots.Length == 0)
     {
         throw new ArgumentException("--workspace must include at least one non-empty path when assigning a group.");
     }
@@ -566,22 +705,23 @@ static void SaveLocalWorkspaceGroup(string group, IReadOnlyList<string> workspac
     var existingGroup = currentGroups.FirstOrDefault(candidate => string.Equals(candidate.Name, group, StringComparison.OrdinalIgnoreCase));
     if (add && existingGroup is not null)
     {
-        roots = existingGroup.Roots
-            .Concat(roots)
+        normalizedRoots = existingGroup.Roots
+            .Concat(normalizedRoots)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
 
     var existing = currentGroups
         .Where(candidate => !string.Equals(candidate.Name, group, StringComparison.OrdinalIgnoreCase))
-        .Append(new LocalWorkspaceGroup(group, roots))
+        .Append(new LocalWorkspaceGroup(group, normalizedRoots))
         .OrderBy(candidate => candidate.Name, StringComparer.OrdinalIgnoreCase)
         .ToArray();
 
     Directory.CreateDirectory(Path.GetDirectoryName(path)!);
     File.WriteAllText(path, JsonSerializer.Serialize(new LocalWorkspaceGroupStore(existing), JsonOptions()));
     var action = add && existingGroup is not null ? "Updated" : "Saved";
-    Console.Error.WriteLine($"{action} workspace group '{group}' with {roots.Length} workspace(s) to {path}.");
+    Console.Error.WriteLine($"{action} workspace group '{group}' with {normalizedRoots.Length} workspace(s) to {path}.");
+    return new CreateWorkspaceGroupResult(group, "local", path, normalizedRoots, add && existingGroup is not null);
 }
 
 static string GetLocalWorkspaceGroupsPath()
@@ -596,6 +736,31 @@ static string NormalizePath(string path)
         : fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 }
 
+static async Task<string> ResolveLocalWorkspaceTargetPathAsync(
+    string workspacePath,
+    IIndexedWorkspaceRegistry workspaceRegistry)
+{
+    var trimmed = workspacePath.Trim();
+    if (!Path.IsPathFullyQualified(trimmed) &&
+        trimmed.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) < 0 &&
+        !Directory.Exists(trimmed) &&
+        !File.Exists(trimmed))
+    {
+        var matches = (await workspaceRegistry.GetIndexedWorkspacesAsync())
+            .Where(workspace => string.Equals(Path.GetFileName(NormalizePath(workspace.WorkspaceRoot)), trimmed, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        return matches.Length switch
+        {
+            1 => matches[0].WorkspaceRoot,
+            0 => throw new InvalidOperationException($"Workspace '{trimmed}' has not been indexed yet. Use a full path for the first index, then the workspace name can be used for incremental indexing."),
+            _ => throw new InvalidOperationException($"Workspace name '{trimmed}' matches {matches.Length} indexed workspaces. Use a full path.")
+        };
+    }
+
+    return Path.GetFullPath(trimmed);
+}
+
 static JsonSerializerOptions JsonOptions()
     => new(JsonSerializerDefaults.Web)
     {
@@ -608,9 +773,10 @@ static void WriteHelp()
     RagNet Indexer
 
     Commands:
-      index       --workspace|-w <target> [--workspace|-w <target> ...] [--group|-g <name>] [--add|-a] [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
+      index       --workspace|-w <target> [--workspace|-w <target> ...] [--current|-c] [--group|-g <name>] [--add|-a] [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
       index       --group|-g <name> [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
       status      --workspace <path>
+      create      group <name> --workspace|-w <indexed-name-or-root> [--workspace|-w <indexed-name-or-root> ...] [--current|-c] [--add|-a]
       list        groups
       list        workspaces
       delete      group <name>
@@ -620,16 +786,20 @@ static void WriteHelp()
       --profile       Index profile: all, code, docs, metadata, frontend, or tests. Default is all.
       --group, -g     With --workspace, saves/replaces a local group. Without --workspace, indexes an existing local or configured group.
       --workspace, -w Index target: workspace root, directory, solution file, or supported file. Repeat to union targets.
+      --current, -c   Add the current directory as an index target.
       --add, -a       With --workspace and --group, append targets to the existing local group instead of replacing it.
       --dry-run       Preview files and chunks that would be indexed without writing vectors, state, registry, or local groups.
       --no-progress   Suppress progress output. Index/status/delete results are written to stdout.
 
     Examples:
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln
+      ragnet-indexer index --current
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln --dry-run
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln --workspace D:\Work\Product\Admin\Admin.sln --group my-product
       ragnet-indexer index -w D:\Work\Product\Api\Api.sln -w D:\Work\Product\docs\api
       ragnet-indexer index -w D:\Work\Product\Worker -g my-product -a
+      ragnet-indexer create group my-product -w Api -w Admin
+      ragnet-indexer create group my-product --current
       ragnet-indexer index --group my-product --force
       ragnet-indexer status --workspace D:\Work\Product\Api
       ragnet-indexer list groups
@@ -666,5 +836,12 @@ sealed record WorkspaceGroupListItem(
 sealed record DeleteWorkspaceGroupResult(string Name, string Source, string StorePath);
 
 sealed record DeleteIndexedWorkspaceResult(string WorkspaceRoot, string WorkspaceId, string CollectionName);
+
+sealed record CreateWorkspaceGroupResult(
+    string Name,
+    string Source,
+    string StorePath,
+    IReadOnlyList<string> Roots,
+    bool Appended);
 
 sealed record OfflineService(string Name, string BaseUrl, string SetupHint);

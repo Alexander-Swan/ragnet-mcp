@@ -109,12 +109,14 @@ Agents can trigger indexing through the `trigger_indexing` MCP tool. Humans, scr
 
 ```powershell
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln"
+.\bin\ragnet-indexer.exe index --current
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --dry-run
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --force
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --workspace "D:\Work\Product\Admin\Admin.sln" --group my-product
 .\bin\ragnet-indexer.exe index -w "D:\Work\Product\Api\Api.sln" -w "D:\Work\Product\docs\api"
 .\bin\ragnet-indexer.exe index -w "D:\Work\Product\Worker" -g my-product -a
 .\bin\ragnet-indexer.exe index --group my-product
+.\bin\ragnet-indexer.exe create group my-product -w Api -w Admin
 .\bin\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
 .\bin\ragnet-indexer.exe list groups
 .\bin\ragnet-indexer.exe list workspaces
@@ -122,7 +124,7 @@ Agents can trigger indexing through the `trigger_indexing` MCP tool. Humans, scr
 .\bin\ragnet-indexer.exe delete workspace "D:\Work\Product\Api"
 ```
 
-The CLI prints progress for each indexing phase to stderr and leaves index/status/delete results on stdout for scripts. Pass `--no-progress` to suppress progress output. Add `--dry-run` to `index` to preview the resolved workspace root, target paths, scanned files, chunks that would be indexed, state compatibility, and changed/deleted/unchanged file counts without deleting vectors, creating embeddings, saving index state, updating the workspace registry, or writing local groups. `--workspace`/`-w` is an index target: a workspace root, subdirectory, solution file, or supported file. Repeating it unions all compatible targets; for example, two solution files in the same repo index only those solution graphs, not unrelated sibling solutions. Pairing `--workspace` with `--group`/`-g` saves that target set to `.ragnet/indexer-workspace-groups.json` in the current directory, so future runs can use `index --group my-product`. Add `--add` or `-a` to append new targets to an existing local group instead of replacing it.
+The CLI prints progress for each indexing phase to stderr and leaves index/status/delete results on stdout for scripts. Pass `--no-progress` to suppress progress output. Add `--dry-run` to `index` to preview the resolved workspace root, target paths, scanned files, chunks that would be indexed, state compatibility, and changed/deleted/unchanged file counts without deleting vectors, creating embeddings, saving index state, updating the workspace registry, or writing local groups. `--workspace`/`-w` is an index target: a workspace root, subdirectory, solution file, or supported file. Use `--current`/`-c` to add the current directory as a target. If no target is provided and the current directory is inside an already indexed workspace, the CLI reindexes that workspace incrementally. Repeating targets unions all compatible targets; for example, two solution files in the same repo index only those solution graphs, not unrelated sibling solutions. Pairing `--workspace` or `--current` with `--group`/`-g` saves that target set to `.ragnet/indexer-workspace-groups.json` in the current directory, so future runs can use `index --group my-product`. Use `create group <name> -w <indexed-workspace-name-or-root>` to create or replace a local group from already indexed workspaces without running indexing. Add `--add` or `-a` to append new targets to an existing local group instead of replacing it.
 
 Use `list groups` to see configured and local indexer groups in a table. Use `list workspaces` to see indexed workspaces from the Qdrant registry in a table. `delete group` removes local indexer groups; configured groups are read-only from the CLI and should be removed from configuration. `delete workspace` removes the workspace vector collection, Qdrant registry record, and Qdrant index-state point.
 

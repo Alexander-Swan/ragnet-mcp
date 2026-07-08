@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 using RagNet.Mcp.Analyzers.Interfaces;
 using RagNet.Mcp.Configuration;
+using RagNet.Mcp.Embeddings;
 using RagNet.Mcp.Embeddings.Interfaces;
 using RagNet.Mcp.Indexing;
 using RagNet.Mcp.Indexing.Interfaces;
@@ -83,6 +84,44 @@ public sealed class WorkspaceIndexerTests
     }
 
     [Fact]
+    public async Task IndexTargetsAsync_BareWorkspaceNameResolvesIndexedWorkspaceRoot()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var sourceFile = workspace.WriteFile("src/Program.cs", "program");
+        var analyzer = new FakeAnalyzer();
+        var registry = new FakeIndexedWorkspaceRegistry();
+        registry.Records.Add(IndexedWorkspace(workspace.RootPath));
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(State(workspace.RootPath)),
+            new FakeVectorStore(),
+            analyzer,
+            registry);
+
+        var result = Assert.Single(await indexer.IndexTargetsAsync([Path.GetFileName(workspace.RootPath)]));
+
+        Assert.Equal(Path.GetFullPath(workspace.RootPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), result.WorkspaceRoot);
+        Assert.Equal([Path.GetFullPath(sourceFile)], analyzer.AnalyzedFiles);
+    }
+
+    [Fact]
+    public async Task IndexTargetsAsync_UnindexedBareWorkspaceNameRequiresFullPath()
+    {
+        using var workspace = new TemporaryWorkspace();
+        workspace.WriteFile("src/Program.cs", "program");
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(State(workspace.RootPath)),
+            new FakeVectorStore(),
+            new FakeAnalyzer());
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => indexer.IndexTargetsAsync([Path.GetFileName(workspace.RootPath)]));
+
+        Assert.Contains("Use a full path for the first index", exception.Message);
+    }
+
+    [Fact]
     public async Task IndexTargetsAsync_EmbeddingFailuresDoNotShiftChunkEmbeddingAlignment()
     {
         using var workspace = new TemporaryWorkspace();
@@ -112,6 +151,29 @@ public sealed class WorkspaceIndexerTests
         Assert.Single(result.Warnings);
         Assert.Equal([Path.GetFullPath(first), Path.GetFullPath(third)], vectorStore.UpsertedChunks.Select(chunk => chunk.FilePath).ToArray());
         Assert.Equal([1f, 3f], vectorStore.UpsertedEmbeddings.Select(embedding => embedding[0]).ToArray());
+    }
+
+    [Fact]
+    public async Task IndexTargetsAsync_MissingEmbeddingModelFailsFast()
+    {
+        using var workspace = new TemporaryWorkspace();
+        workspace.WriteFile("src/First.cs", "first");
+        workspace.WriteFile("src/Second.cs", "second");
+        var vectorStore = new FakeVectorStore();
+        var embeddingProvider = new FakeEmbeddingProvider((_, _) =>
+            throw new EmbeddingModelNotFoundException("missing-model", "model missing"));
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(State(workspace.RootPath)),
+            vectorStore,
+            new FakeAnalyzer(),
+            embeddingProvider: embeddingProvider);
+
+        var exception = await Assert.ThrowsAsync<EmbeddingModelNotFoundException>(
+            () => indexer.IndexTargetsAsync([workspace.RootPath]));
+
+        Assert.Equal("missing-model", exception.Model);
+        Assert.Empty(vectorStore.UpsertedChunks);
     }
 
     [Fact]
@@ -499,6 +561,21 @@ public sealed class WorkspaceIndexerTests
             fingerprint ?? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(fullPath))),
             info.Length,
             info.LastWriteTimeUtc);
+    }
+
+    private static IndexedWorkspaceRecord IndexedWorkspace(string workspaceRoot)
+    {
+        var normalizedRoot = Path.GetFullPath(workspaceRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return new IndexedWorkspaceRecord(
+            normalizedRoot,
+            "workspace-id",
+            "collection",
+            [],
+            [normalizedRoot],
+            DateTimeOffset.UtcNow,
+            FilesScanned: 1,
+            ChunksIndexed: 1,
+            FullReindex: false);
     }
 
     private static SearchResult Result(
