@@ -206,7 +206,8 @@ public sealed class WorkspaceIndexerTests
         workspace.WriteFile("Api/Api.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
         workspace.WriteFile("Admin/Admin.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
         var analyzer = new FakeAnalyzer();
-        var indexer = CreateIndexer(workspace.RootPath, new FakeStateStore(State(workspace.RootPath)), new FakeVectorStore(), analyzer);
+        var registry = new FakeIndexedWorkspaceRegistry();
+        var indexer = CreateIndexer(workspace.RootPath, new FakeStateStore(State(workspace.RootPath)), new FakeVectorStore(), analyzer, registry);
 
         var results = await indexer.IndexTargetsAsync(
         [
@@ -222,6 +223,14 @@ public sealed class WorkspaceIndexerTests
         Assert.Contains(Path.GetFullPath(docsFile), analyzer.AnalyzedFiles);
         Assert.Contains(Path.GetFullPath(explicitFile), analyzer.AnalyzedFiles);
         Assert.DoesNotContain(Path.GetFullPath(unrelatedFile), analyzer.AnalyzedFiles);
+        var record = Assert.Single(registry.Records);
+        Assert.Equal(Path.GetFullPath(workspace.RootPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), record.WorkspaceRoot);
+        Assert.Contains(Path.GetFullPath(apiSolution), record.IndexedTargets);
+        Assert.Contains(Path.GetFullPath(adminSolution), record.IndexedTargets);
+        Assert.Contains(Path.GetFullPath(Path.Combine(workspace.RootPath, "docs")), record.IndexedTargets);
+        Assert.Contains(Path.GetFullPath(explicitFile), record.IndexedTargets);
+        Assert.False(string.IsNullOrWhiteSpace(record.WorkspaceId));
+        Assert.False(string.IsNullOrWhiteSpace(record.CollectionName));
     }
 
     [Fact]
@@ -297,11 +306,12 @@ public sealed class WorkspaceIndexerTests
         string workspaceRoot,
         FakeStateStore stateStore,
         FakeVectorStore vectorStore,
-        FakeAnalyzer analyzer)
+        FakeAnalyzer analyzer,
+        FakeIndexedWorkspaceRegistry? registry = null)
         => new(
             new FakeWorkspaceDetector(workspaceRoot),
             new FakeWorkspaceScopeResolver(workspaceRoot),
-            new FakeIndexedWorkspaceRegistry(),
+            registry ?? new FakeIndexedWorkspaceRegistry(),
             [analyzer],
             stateStore,
             new FakeEmbeddingProvider(),
@@ -373,11 +383,28 @@ public sealed class WorkspaceIndexerTests
 
     private sealed class FakeIndexedWorkspaceRegistry : IIndexedWorkspaceRegistry
     {
-        public void MarkIndexed(string workspaceRoot)
+        public List<IndexedWorkspaceRecord> Records { get; } = [];
+
+        public Task MarkIndexedAsync(IndexedWorkspaceRecord record, CancellationToken cancellationToken = default)
         {
+            Records.Add(record);
+            return Task.CompletedTask;
         }
 
-        public IReadOnlyList<string> GetIndexedWorkspaceRoots() => [];
+        public Task<IReadOnlyList<string>> GetIndexedWorkspaceRootsAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<string>>(Records.Select(record => record.WorkspaceRoot).ToArray());
+
+        public Task<IReadOnlyList<IndexedWorkspaceRecord>> GetIndexedWorkspacesAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<IndexedWorkspaceRecord>>(Records.ToArray());
+
+        public Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default)
+        {
+            Records.RemoveAll(record => string.Equals(
+                record.WorkspaceRoot,
+                Path.GetFullPath(workspaceRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase));
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class FakeStateStore(WorkspaceIndexState state) : IWorkspaceIndexStateStore
@@ -392,6 +419,9 @@ public sealed class WorkspaceIndexerTests
             SavedState = state;
             return Task.CompletedTask;
         }
+
+        public Task DeleteAsync(string workspaceRoot, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
     }
 
     private sealed class FakeEmbeddingProvider : IEmbeddingProvider

@@ -25,7 +25,7 @@ public sealed class WorkspaceScopeResolver(
             WorkspaceScopeKind.CurrentWorkspace => [await workspaceDetector.DetectAsync(Required(filePath, "file_path"), cancellationToken)],
             WorkspaceScopeKind.ExplicitWorkspaceRoot => [await workspaceDetector.DetectAsync(Required(workspaceRoot, "workspace_root"), cancellationToken)],
             WorkspaceScopeKind.NamedWorkspaceGroup => await ResolveGroupAsync(Required(workspaceGroup, "workspace_group"), cancellationToken),
-            WorkspaceScopeKind.AllIndexedWorkspaces => indexedWorkspaceRegistry.GetIndexedWorkspaceRoots()
+            WorkspaceScopeKind.AllIndexedWorkspaces => (await indexedWorkspaceRegistry.GetIndexedWorkspaceRootsAsync(cancellationToken))
                 .Select(root => new WorkspaceInfo(root, new DirectoryInfo(root).Name, null, null))
                 .ToArray(),
             _ => throw new InvalidOperationException($"Unsupported workspace scope '{scope}'.")

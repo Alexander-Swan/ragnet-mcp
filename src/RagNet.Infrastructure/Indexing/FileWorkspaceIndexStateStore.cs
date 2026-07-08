@@ -54,6 +54,17 @@ public sealed class FileWorkspaceIndexStateStore : IWorkspaceIndexStateStore
         await JsonSerializer.SerializeAsync(stream, payload, JsonOptions, cancellationToken);
     }
 
+    public Task DeleteAsync(string workspaceRoot, CancellationToken cancellationToken = default)
+    {
+        var path = GetStatePath(workspaceRoot);
+        if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
+
+        return Task.CompletedTask;
+    }
+
     private static string GetStatePath(string workspaceRoot)
         => Path.Combine(workspaceRoot, ".ragnet", "state.json");
 

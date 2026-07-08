@@ -163,7 +163,18 @@ Repeat `--workspace` to union multiple targets. Two solution files in the same r
 .\bin\ragnet-indexer.exe index --group my-product
 ```
 
-The indexer prints progress to stderr and writes the final JSON result to stdout. For quiet automation:
+List local indexer groups and indexed workspaces as tables, or remove them:
+
+```powershell
+.\bin\ragnet-indexer.exe list groups
+.\bin\ragnet-indexer.exe list workspaces
+.\bin\ragnet-indexer.exe delete group my-product
+.\bin\ragnet-indexer.exe delete workspace "D:\Work\Product\Api"
+```
+
+Configured groups are listed as read-only. `delete workspace` removes the Qdrant vector collection, Qdrant registry record, and Qdrant index-state point.
+
+The indexer prints progress to stderr and writes index/status/delete results to stdout. For quiet automation:
 
 ```powershell
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --no-progress

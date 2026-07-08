@@ -2,7 +2,11 @@ namespace RagNet.Mcp.Workspace.Interfaces;
 
 public interface IIndexedWorkspaceRegistry
 {
-    void MarkIndexed(string workspaceRoot);
+    Task MarkIndexedAsync(IndexedWorkspaceRecord record, CancellationToken cancellationToken = default);
 
-    IReadOnlyList<string> GetIndexedWorkspaceRoots();
+    Task<IReadOnlyList<string>> GetIndexedWorkspaceRootsAsync(CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<IndexedWorkspaceRecord>> GetIndexedWorkspacesAsync(CancellationToken cancellationToken = default);
+
+    Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default);
 }

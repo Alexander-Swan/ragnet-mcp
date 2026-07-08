@@ -41,8 +41,19 @@ public static class RagNetServiceCollectionExtensions
             client.BaseAddress = new Uri(options.Qdrant.BaseUrl);
         });
 
+        services.AddHttpClient<QdrantIndexedWorkspaceRegistry>((serviceProvider, client) =>
+        {
+            var options = serviceProvider.GetRequiredService<IOptions<RagNetOptions>>().Value;
+            client.BaseAddress = new Uri(options.Qdrant.BaseUrl);
+        });
+
+        services.AddHttpClient<QdrantWorkspaceIndexStateStore>((serviceProvider, client) =>
+        {
+            var options = serviceProvider.GetRequiredService<IOptions<RagNetOptions>>().Value;
+            client.BaseAddress = new Uri(options.Qdrant.BaseUrl);
+        });
+
         services.AddSingleton<IWorkspaceDetector, WorkspaceDetector>();
-        services.AddSingleton<IIndexedWorkspaceRegistry, IndexedWorkspaceRegistry>();
         services.AddSingleton<IWorkspaceScopeResolver, WorkspaceScopeResolver>();
         services.AddSingleton<ICodeAnalyzer, CSharpAnalyzer>();
         services.AddSingleton<ICodeAnalyzer, DocumentationAnalyzer>();
@@ -50,9 +61,10 @@ public static class RagNetServiceCollectionExtensions
         services.AddSingleton<ICodeAnalyzer, JavaScriptTypeScriptAnalyzer>();
         services.AddSingleton<ICodeAnalyzer, MarkupAnalyzer>();
         services.AddSingleton<ISourceIdentityResolver, GitSourceIdentityResolver>();
-        services.AddSingleton<IWorkspaceIndexStateStore, FileWorkspaceIndexStateStore>();
+        services.AddSingleton<IWorkspaceIndexStateStore>(serviceProvider => serviceProvider.GetRequiredService<QdrantWorkspaceIndexStateStore>());
         services.AddSingleton<InMemoryVectorStore>();
         services.AddSingleton<IVectorStore>(serviceProvider => serviceProvider.GetRequiredService<QdrantVectorStore>());
+        services.AddSingleton<IIndexedWorkspaceRegistry>(serviceProvider => serviceProvider.GetRequiredService<QdrantIndexedWorkspaceRegistry>());
         services.AddSingleton<IWorkspaceIndexer, WorkspaceIndexer>();
         services.AddSingleton<IIndexingJobQueue, InMemoryIndexingJobQueue>();
 

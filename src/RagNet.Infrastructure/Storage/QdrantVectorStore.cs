@@ -438,7 +438,7 @@ internal static partial class QdrantCollectionNaming
             : fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
     }
 
-    private static string SanitizeCollectionPart(string value)
+    public static string SanitizeCollectionPart(string value)
     {
         var sanitized = UnsafeCollectionCharacters.Replace(value.Trim().ToLowerInvariant(), "-").Trim('-', '_', '.');
         return sanitized.Length <= 64 ? sanitized : sanitized[..64].Trim('-', '_', '.');

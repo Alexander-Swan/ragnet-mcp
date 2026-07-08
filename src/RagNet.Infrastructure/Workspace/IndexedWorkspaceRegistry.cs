@@ -5,21 +5,42 @@ namespace RagNet.Mcp.Workspace;
 public sealed class IndexedWorkspaceRegistry : IIndexedWorkspaceRegistry
 {
     private readonly object _gate = new();
-    private readonly HashSet<string> _roots = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IndexedWorkspaceRecord> _records = new(StringComparer.OrdinalIgnoreCase);
 
-    public void MarkIndexed(string workspaceRoot)
+    public Task MarkIndexedAsync(IndexedWorkspaceRecord record, CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            _roots.Add(Path.GetFullPath(workspaceRoot));
+            _records[Path.GetFullPath(record.WorkspaceRoot)] = record;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<string>> GetIndexedWorkspaceRootsAsync(CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult<IReadOnlyList<string>>(_records.Keys.Order(StringComparer.OrdinalIgnoreCase).ToArray());
         }
     }
 
-    public IReadOnlyList<string> GetIndexedWorkspaceRoots()
+    public Task<IReadOnlyList<IndexedWorkspaceRecord>> GetIndexedWorkspacesAsync(CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            return _roots.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+            return Task.FromResult<IReadOnlyList<IndexedWorkspaceRecord>>(
+                _records.Values.OrderBy(record => record.WorkspaceRoot, StringComparer.OrdinalIgnoreCase).ToArray());
         }
+    }
+
+    public Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            _records.Remove(Path.GetFullPath(workspaceRoot));
+        }
+
+        return Task.CompletedTask;
     }
 }

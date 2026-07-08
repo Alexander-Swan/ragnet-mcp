@@ -267,14 +267,26 @@ public sealed class WorkspaceIndexer(
                 .ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
             : currentFiles;
 
+        var indexedAtUtc = DateTimeOffset.UtcNow;
         await indexStateStore.SaveAsync(new WorkspaceIndexState(
             workspaceRoot,
             filesToSave,
             _options.Ollama.EmbeddingModel,
             IndexSchemaVersion,
-            DateTimeOffset.UtcNow,
+            indexedAtUtc,
             StateExists: true), cancellationToken);
-        indexedWorkspaceRegistry.MarkIndexed(workspaceRoot);
+
+        await indexedWorkspaceRegistry.MarkIndexedAsync(new IndexedWorkspaceRecord(
+            workspaceRoot,
+            QdrantCollectionNaming.GetWorkspaceId(workspaceRoot),
+            QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot),
+            GetWorkspaceGroupsForRoot(workspaceRoot),
+            targetPlan.IndexedTargets,
+            indexedAtUtc,
+            profileFiles.Length,
+            embeddedChunks.Count,
+            fullReindex), cancellationToken);
+
         Report(progress, workspaceRoot, IndexingProgressStage.Completed, embeddedChunks.Count, chunks.Count, "Indexing completed.");
         return new IndexWorkspaceResult(workspaceRoot, profileFiles.Length, embeddedChunks.Count, fullReindex, warnings);
     }
@@ -338,6 +350,7 @@ public sealed class WorkspaceIndexer(
             EnsurePathUnderWorkspace(fullPath, workspaceRoot);
             return WorkspaceIndexTargetPlan.Scoped(
                 workspaceRoot,
+                indexedTargets: [fullPath],
                 EnumerateFiles(workspaceRoot, fullPath, excludeDirectories).ToArray(),
                 deleteRoots: [fullPath],
                 deleteFiles: []);
@@ -362,6 +375,7 @@ public sealed class WorkspaceIndexer(
 
         return WorkspaceIndexTargetPlan.Scoped(
             workspaceRoot,
+            indexedTargets: [fullPath],
             files,
             deleteRoots: [],
             deleteFiles: [fullPath]);
@@ -408,6 +422,7 @@ public sealed class WorkspaceIndexer(
 
         return WorkspaceIndexTargetPlan.Scoped(
             workspaceRoot,
+            indexedTargets: [solutionPath],
             files.Where(file => _analyzers.Any(analyzer => analyzer.CanAnalyze(file))).ToArray(),
             deleteRoots.ToArray(),
             deleteFiles.ToArray());
@@ -700,6 +715,21 @@ public sealed class WorkspaceIndexer(
             .Concat(excludeDirectories ?? [])
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private IReadOnlyList<string> GetWorkspaceGroupsForRoot(string workspaceRoot)
+    {
+        var normalizedWorkspaceRoot = NormalizePath(workspaceRoot);
+        return _options.WorkspaceGroups
+            .Where(group => group.Roots
+                .Where(root => !string.IsNullOrWhiteSpace(root))
+                .Select(NormalizePath)
+                .Any(root => string.Equals(root, normalizedWorkspaceRoot, StringComparison.OrdinalIgnoreCase)))
+            .Select(group => group.Name)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
 
@@ -1071,21 +1101,24 @@ public sealed class WorkspaceIndexer(
     private sealed record WorkspaceIndexTargetPlan(
         string WorkspaceRoot,
         bool IsFullWorkspace,
+        IReadOnlyList<string> IndexedTargets,
         IReadOnlyList<string> Files,
         IReadOnlyList<string> DeleteRoots,
         IReadOnlyList<string> DeleteFiles)
     {
         public static WorkspaceIndexTargetPlan FullWorkspace(string workspaceRoot, IReadOnlyList<string> files)
-            => new(workspaceRoot, true, NormalizeDistinct(files), [workspaceRoot], []);
+            => new(workspaceRoot, true, [NormalizePath(workspaceRoot)], NormalizeDistinct(files), [workspaceRoot], []);
 
         public static WorkspaceIndexTargetPlan Scoped(
             string workspaceRoot,
+            IReadOnlyList<string> indexedTargets,
             IReadOnlyList<string> files,
             IReadOnlyList<string> deleteRoots,
             IReadOnlyList<string> deleteFiles)
             => new(
                 workspaceRoot,
                 false,
+                NormalizeDistinct(indexedTargets),
                 NormalizeDistinct(files),
                 NormalizeDistinct(deleteRoots),
                 NormalizeDistinct(deleteFiles));
@@ -1109,6 +1142,7 @@ public sealed class WorkspaceIndexer(
 
             return Scoped(
                 WorkspaceRoot,
+                IndexedTargets.Concat(other.IndexedTargets).ToArray(),
                 Files.Concat(other.Files).ToArray(),
                 DeleteRoots.Concat(other.DeleteRoots).ToArray(),
                 DeleteFiles.Concat(other.DeleteFiles).ToArray());

@@ -72,11 +72,13 @@ Indexing and search support conservative profiles: `all`, `code`, `docs`, `metad
 
 ## Incremental Indexing
 
-After the first `index_workspace` run, RagNet stores content-hash file fingerprints in `.ragnet/state.json` under the indexed workspace. Later indexing runs compare the current file list with that state and only re-analyze/re-embed files that changed. Deleted files are removed from the vector store before the state is saved.
+After the first `index_workspace` run, RagNet stores content-hash file fingerprints in a Qdrant-backed index-state collection named `{CollectionPrefix}-index-state`. Later indexing runs compare the current file list with that state and only re-analyze/re-embed files that changed. Deleted files are removed from the vector store before the state is saved.
 
-The state file also records the embedding model, index/analyzer schema version, and last saved timestamp. If the configured embedding model or schema version changes, RagNet automatically clears the workspace vectors and performs a full reindex. You can force the same lifecycle manually by passing `force: true` to `index_workspace` or `index_workspace_group`. Profile-scoped indexing updates only files in that profile and requires a compatible existing all-profile state.
+The Qdrant state point also records the workspace root, embedding model, index/analyzer schema version, last saved timestamp, and indexed file metadata. If the configured embedding model or schema version changes, RagNet automatically clears the workspace vectors and performs a full reindex. You can force the same lifecycle manually by passing `force: true` to `index_workspace` or `index_workspace_group`. Profile-scoped indexing updates only files in that profile and requires a compatible existing all-profile state.
 
 Qdrant collections are named deterministically as `{CollectionPrefix}-{workspaceId}`, where `workspaceId` is derived from the normalized workspace root rather than the raw path. The default prefix is `ragnet`. A forced/full reindex deletes the workspace collection and recreates it with the current embedding vector size. To manually reset a workspace index, run `index_workspace` with `force: true`, or delete the matching collection from Qdrant and re-run indexing.
+
+RagNet also maintains a Qdrant-backed workspace registry collection named `{CollectionPrefix}-workspace-registry`. Each successful indexing run records the workspace root, workspace id, vector collection name, configured workspace groups, indexed targets/scopes, last indexed timestamp, files scanned, chunks indexed, and whether the run was a full reindex. Search scope `all_indexed_workspaces` reads this registry, so indexed workspaces survive MCP process restarts.
 
 Use `get_index_status` with a file or directory inside a workspace to inspect whether state exists, the last indexed timestamp, indexed file count, embedding model, schema version, and whether the stored state requires a full reindex.
 
@@ -103,9 +105,15 @@ Agents can trigger indexing through the `trigger_indexing` MCP tool. Humans, scr
 .\bin\ragnet-indexer.exe index -w "D:\Work\Product\Worker" -g my-product -a
 .\bin\ragnet-indexer.exe index --group my-product
 .\bin\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
+.\bin\ragnet-indexer.exe list groups
+.\bin\ragnet-indexer.exe list workspaces
+.\bin\ragnet-indexer.exe delete group my-product
+.\bin\ragnet-indexer.exe delete workspace "D:\Work\Product\Api"
 ```
 
-The CLI prints progress for each indexing phase to stderr and leaves the final JSON result on stdout for scripts. Pass `--no-progress` to suppress progress output. `--workspace`/`-w` is an index target: a workspace root, subdirectory, solution file, or supported file. Repeating it unions all compatible targets; for example, two solution files in the same repo index only those solution graphs, not unrelated sibling solutions. Pairing `--workspace` with `--group`/`-g` saves that target set to `.ragnet/indexer-workspace-groups.json` in the current directory, so future runs can use `index --group my-product`. Add `--add` or `-a` to append new targets to an existing local group instead of replacing it.
+The CLI prints progress for each indexing phase to stderr and leaves index/status/delete results on stdout for scripts. Pass `--no-progress` to suppress progress output. `--workspace`/`-w` is an index target: a workspace root, subdirectory, solution file, or supported file. Repeating it unions all compatible targets; for example, two solution files in the same repo index only those solution graphs, not unrelated sibling solutions. Pairing `--workspace` with `--group`/`-g` saves that target set to `.ragnet/indexer-workspace-groups.json` in the current directory, so future runs can use `index --group my-product`. Add `--add` or `-a` to append new targets to an existing local group instead of replacing it.
+
+Use `list groups` to see configured and local indexer groups in a table. Use `list workspaces` to see indexed workspaces from the Qdrant registry in a table. `delete group` removes local indexer groups; configured groups are read-only from the CLI and should be removed from configuration. `delete workspace` removes the workspace vector collection, Qdrant registry record, and Qdrant index-state point.
 
 The indexer is intended to run where source files are accessible: directly on a developer machine for local projects, or in CI/webhook workers after checking out a repository. The web MCP/search service remains HTTP-based and queries Qdrant.
 
