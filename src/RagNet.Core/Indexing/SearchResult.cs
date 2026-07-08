@@ -7,4 +7,9 @@ public sealed record SearchResult(
     int StartLine,
     int EndLine,
     double Score,
-    string Preview);
+    string Preview)
+{
+    public string ContentType { get; init; } = IndexedContentTypes.Code;
+
+    public string Language { get; init; } = string.Empty;
+}

@@ -27,7 +27,8 @@ Hybrid mode does this:
 
 - starts Qdrant at `http://localhost:6333`
 - starts Ollama at `http://localhost:11434`, unless something is already listening there
-- pulls the embedding model, default `mxbai-embed-large`
+- pulls the primary embedding model, default `mxbai-embed-large`
+- pulls additional compatibility embedding models, default `nomic-embed-text`
 - publishes `ragnet-mcp.exe`
 - publishes `ragnet-indexer.exe`
 - registers MCP configs for supported local tools
@@ -59,6 +60,18 @@ OLLAMA_MODE=Docker ./scripts/setup.sh Hybrid
 ```
 
 The default is `-OllamaMode Auto`, which uses local Ollama when `localhost:11434` is already occupied and otherwise starts the Docker Ollama service.
+
+To override the extra models pulled by setup:
+
+```powershell
+.\scripts\setup.ps1 -AdditionalEmbeddingModels @("nomic-embed-text", "all-minilm")
+```
+
+On Linux/macOS:
+
+```bash
+ADDITIONAL_EMBEDDING_MODELS="nomic-embed-text all-minilm" ./scripts/setup.sh Hybrid
+```
 
 The published executables are written to:
 

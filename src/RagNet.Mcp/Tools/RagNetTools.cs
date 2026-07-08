@@ -51,27 +51,31 @@ public sealed class RagNetTools(IWorkspaceIndexer indexer)
         return [await indexer.IndexAsync(workspace_path, exclude_directories, force, cancellationToken)];
     }
 
-    [McpServerTool(Name = "search_code"), Description("Semantic search over the indexed code for the workspace containing file_path.")]
+    [McpServerTool(Name = "search_code"), Description("Semantic search over indexed product context for the workspace containing file_path.")]
     public Task<IReadOnlyList<SearchResult>> SearchCode(
         [Description("A file path inside the target workspace. Required for default current_workspace scope.")] string? file_path,
         [Description("Natural language search query.")] string query,
         [Description("Search scope: current_workspace, explicit_workspace_root, named_workspace_group, or all_indexed_workspaces. Default is current_workspace.")] string? scope = null,
         [Description("Explicit workspace root when scope is explicit_workspace_root.")] string? workspace_root = null,
         [Description("Configured group name when scope is named_workspace_group.")] string? workspace_group = null,
+        [Description("Content filter: code, documentation, markup, project_metadata, or all. Default is all.")] string? content_type = null,
+        [Description("Ranking mode: balanced, docs_first, or code_first. Default is balanced.")] string? retrieval_mode = null,
         [Description("Maximum number of results to return.")] int limit = 10,
         CancellationToken cancellationToken = default)
-        => indexer.SearchAsync(file_path, query, Math.Clamp(limit, 1, 50), hybrid: false, scope, workspace_root, workspace_group, cancellationToken);
+        => indexer.SearchAsync(file_path, query, Math.Clamp(limit, 1, 50), hybrid: false, scope, workspace_root, workspace_group, content_type, retrieval_mode, cancellationToken);
 
-    [McpServerTool(Name = "hybrid_search"), Description("Hybrid semantic and keyword search over the indexed code for the workspace containing file_path.")]
+    [McpServerTool(Name = "hybrid_search"), Description("Hybrid semantic and keyword search over indexed product context for the workspace containing file_path.")]
     public Task<IReadOnlyList<SearchResult>> HybridSearch(
         [Description("A file path inside the target workspace. Required for default current_workspace scope.")] string? file_path,
         [Description("Natural language query and optional exact identifiers.")] string query,
         [Description("Search scope: current_workspace, explicit_workspace_root, named_workspace_group, or all_indexed_workspaces. Default is current_workspace.")] string? scope = null,
         [Description("Explicit workspace root when scope is explicit_workspace_root.")] string? workspace_root = null,
         [Description("Configured group name when scope is named_workspace_group.")] string? workspace_group = null,
+        [Description("Content filter: code, documentation, markup, project_metadata, or all. Default is all.")] string? content_type = null,
+        [Description("Ranking mode: balanced, docs_first, or code_first. Default is balanced.")] string? retrieval_mode = null,
         [Description("Maximum number of results to return.")] int limit = 10,
         CancellationToken cancellationToken = default)
-        => indexer.SearchAsync(file_path, query, Math.Clamp(limit, 1, 50), hybrid: true, scope, workspace_root, workspace_group, cancellationToken);
+        => indexer.SearchAsync(file_path, query, Math.Clamp(limit, 1, 50), hybrid: true, scope, workspace_root, workspace_group, content_type, retrieval_mode, cancellationToken);
 
     [McpServerTool(Name = "get_code_context"), Description("Return code lines around a specific file location.")]
     public Task<string> GetCodeContext(

@@ -9,6 +9,5 @@ public interface ICodeAnalyzer
     Task<IReadOnlyList<CodeChunk>> AnalyzeAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default);
 }
 
-// Planned .NET language analyzers:
-// - FSharpAnalyzer: *.fs and project metadata from *.fsproj
-// - VisualBasicAnalyzer: *.vb and project metadata from *.vbproj
+// Planned syntax-aware analyzers:
+// - JavaScript/TypeScript analyzers for imports, exports, functions, classes, components, routes, and tests.

@@ -4,6 +4,8 @@ param(
 
     [string]$EmbeddingModel = "mxbai-embed-large",
 
+    [string[]]$AdditionalEmbeddingModels = @("nomic-embed-text"),
+
     [ValidateSet("Auto", "Docker", "Local")]
     [string]$OllamaMode = "Auto",
 
@@ -70,6 +72,18 @@ function Pull-OllamaModel {
     Write-Warning "Run 'ollama pull $Model' manually if the model is not already installed."
 }
 
+function Pull-OllamaModels {
+    param(
+        [bool]$UseContainer
+    )
+
+    $models = @($EmbeddingModel) + @($AdditionalEmbeddingModels)
+    $models |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique |
+        ForEach-Object { Pull-OllamaModel -Model $_ -UseContainer $UseContainer }
+}
+
 function Use-OllamaContainer {
     if ($OllamaMode -eq "Local") {
         if (-not (Test-PortInUse 11434)) {
@@ -108,7 +122,7 @@ try {
         Invoke-Native { docker compose up -d --build }
 
         if (-not $SkipModelPull) {
-            Invoke-Native { docker exec ollama ollama pull $EmbeddingModel }
+            Pull-OllamaModels -UseContainer $true
         }
     }
     elseif ($Mode -eq "Hybrid") {
@@ -123,7 +137,7 @@ try {
             Invoke-Native { docker compose up -d qdrant }
         }
 
-        Pull-OllamaModel -Model $EmbeddingModel -UseContainer $useOllamaContainer
+        Pull-OllamaModels -UseContainer $useOllamaContainer
 
         Invoke-Native { dotnet restore .\RagNet.Mcp.sln }
         Invoke-Native { dotnet publish .\src\RagNet.Mcp\RagNet.Mcp.csproj `
@@ -146,7 +160,7 @@ try {
             Write-Warning "Native mode does not start Docker Ollama. Use Hybrid mode with -OllamaMode Docker if you want setup to start Ollama in Docker."
         }
         elseif (-not $SkipModelPull) {
-            Pull-OllamaModel -Model $EmbeddingModel -UseContainer $false
+            Pull-OllamaModels -UseContainer $false
         }
 
         Invoke-Native { dotnet restore .\RagNet.Mcp.sln }

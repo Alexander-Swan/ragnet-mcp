@@ -28,6 +28,8 @@ public interface IWorkspaceIndexer
         string? scope,
         string? workspaceRoot,
         string? workspaceGroup,
+        string? contentType = null,
+        string? retrievalMode = null,
         CancellationToken cancellationToken = default);
 
     Task<string> GetCodeContextAsync(string filePath, int line, int before, int after, CancellationToken cancellationToken = default);

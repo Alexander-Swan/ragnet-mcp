@@ -14,4 +14,6 @@ public sealed record CodeChunk(
     string Content)
 {
     public SourceIdentity? Source { get; init; }
+
+    public string ContentType { get; init; } = IndexedContentTypes.Code;
 }

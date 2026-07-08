@@ -30,7 +30,7 @@ http://localhost:7331/health
 .\scripts\setup.ps1
 ```
 
-The setup script starts Qdrant/Ollama, publishes the native web service and indexer executables, pulls the default Ollama embedding model, writes repo-local MCP registration files for Visual Studio and VS Code, registers Codex/Codex CLI when `codex` is available on PATH, and registers Claude Code when `claude` is available on PATH.
+The setup script starts Qdrant/Ollama, publishes the native web service and indexer executables, pulls the default Ollama embedding model plus `nomic-embed-text` for compatibility, writes repo-local MCP registration files for Visual Studio and VS Code, registers Codex/Codex CLI when `codex` is available on PATH, and registers Claude Code when `claude` is available on PATH.
 
 If Ollama is already running on `localhost:11434`, Hybrid setup reuses it and starts only Qdrant in Docker.
 
@@ -113,16 +113,71 @@ RagNet should support both local-only and hosted/team usage without forcing the 
 - Store enough source metadata in vector payloads for hosted search: repository URL, commit SHA, relative path, symbol details, line numbers, and chunk content. A cloud-hosted search service cannot read `D:\...` local files, so context must come from indexed payloads or a repo checkout/object store.
 - Keep Docker-only mode optional. If `ragnet-mcp` itself runs in Docker, workspace folders must be mounted or synced explicitly; the preferred local mode is native indexer plus web search service connected to Dockerized Qdrant/Ollama.
 
+## Documentation Indexing TODO
+
+RagNet should index project documentation as first-class RAG content, not only source code.
+
+For a real product that spans one or more related projects, code and documentation should participate in the same retrieval surface. They can be parsed, chunked, stored, and ranked with different strategies, but agents should be able to issue one product-scoped query and receive the relevant docs plus implementation chunks together.
+
+Planned documentation inputs:
+
+- Markdown: `README.md`, `docs/**/*.md`, `*.md`, `*.mdx`
+- HTML: `docs/**/*.html`, generated static docs, exported API docs, and product documentation sites checked into a repository
+- Plain text and lightweight docs: `*.txt`, `*.rst`, `*.adoc`
+- Later binary/document formats: `*.pdf`, `*.docx`, and generated documentation artifacts
+
+Documentation indexing should use document-specific analyzers instead of code analyzers:
+
+- Split Markdown/MDX by headings, paragraphs, lists, tables, and fenced code blocks.
+- Split HTML by document outline, headings, semantic sections, paragraphs, tables, and code/pre blocks after stripping navigation chrome where possible.
+- Preserve heading hierarchy, page title, anchors, source path, workspace group, repository metadata, and `contentType = documentation` in vector payloads.
+- Add search filters for `code`, `documentation`, or both, plus retrieval modes such as `docs_first`, `code_first`, and `balanced`.
+- Add a general context tool or extend existing context tools so agents can retrieve project documentation alongside code context.
+
 ## Language Support
 
 C# is the MVP language and is analyzed through Roslyn.
 
-Planned .NET language support:
+Planned additional code analyzers:
+
+- JavaScript: `*.js`, `*.jsx`, `*.mjs`, `*.cjs`
+- TypeScript: `*.ts`, `*.tsx`, `*.mts`, `*.cts`
+
+JavaScript and TypeScript should use their own analyzer implementation rather than the C# analyzer, ideally preserving imports, exports, classes, functions, React components, route handlers, and test boundaries.
+
+Deferred until explicitly requested:
 
 - F#: `*.fs` files and `*.fsproj` projects
 - VB.NET: `*.vb` files and `*.vbproj` projects
 
-The analyzer registration in `Program.cs` includes TODO placeholders for future `FSharpAnalyzer` and `VisualBasicAnalyzer` implementations.
+## UI and Markup Analyzer TODO
+
+.NET product indexing should also include UI/view markup because it often contains routes, bindings, validation rules, component composition, localization keys, and view-model references.
+
+Planned UI and markup inputs:
+
+- Razor and Blazor: `*.cshtml`, `*.razor`, `_ViewImports.cshtml`, `_ViewStart.cshtml`
+- Legacy ASP.NET views: `*.vbhtml`, `*.aspx`, `*.ascx`, `*.master`
+- XAML UI and resources: `*.xaml`
+- SPA/application views and templates: `*.html`, including Angular, Aurelia, and similar framework templates
+- React UI files: `*.jsx`, `*.tsx`
+- Web styles and assets where relevant: `*.css`, `*.scss`, `*.less`
+
+These analyzers should preserve route templates, directives, model types, component names, props, event handlers, bindings, resource keys, layout relationships, framework-specific template syntax, and linked code-behind files. Razor/Blazor analysis should eventually connect markup chunks to generated C# symbols where possible.
+
+## .NET Project Metadata TODO
+
+.NET indexing should treat project structure and build configuration as first-class context, not only language source files.
+
+Planned .NET project inputs:
+
+- Solutions and project files: `*.sln`, `*.slnx`, `*.csproj`
+- MSBuild shared files: `Directory.Build.props`, `Directory.Build.targets`, `Directory.Packages.props`, `*.props`, `*.targets`
+- NuGet and SDK metadata: `NuGet.config`, `global.json`, `packages.lock.json`
+- Application configuration: `appsettings*.json`, `launchSettings.json`, `.editorconfig`, `.runsettings`
+- Build and deployment helpers where relevant: Dockerfiles, compose files, CI workflow files, publish profiles, and deployment manifests
+
+These files should be chunked and indexed with metadata such as target frameworks, package references, project references, SDK, nullable/implicit-usings settings, analyzers, source generators, build properties, and configuration keys. This lets retrieval answer questions about dependencies, build behavior, project relationships, runtime configuration, and solution layout without relying only on source-code chunks.
 
 ## Multi-Project Products
 

@@ -8,7 +8,7 @@ For detailed setup, modes, registration, and troubleshooting, see [SETUP.md](SET
 .\scripts\setup.ps1 -Mode Hybrid
 ```
 
-This starts Qdrant and Ollama in Docker, pulls the default embedding model, publishes native Windows executables, and registers supported MCP clients:
+This starts Qdrant and Ollama in Docker, pulls the default RagNet embedding model plus `nomic-embed-text` for compatibility, publishes native Windows executables, and registers supported MCP clients:
 
 - `.mcp.json` for Visual Studio
 - `.vscode/mcp.json` for VS Code
@@ -154,10 +154,59 @@ Default searches stay scoped to the current workspace.
 
 ## Planned Language Support
 
-C# is supported first. Planned .NET analyzers are:
+C# is supported first. Planned code analyzers are:
+
+- JavaScript: `*.js`, `*.jsx`, `*.mjs`, `*.cjs`
+- TypeScript: `*.ts`, `*.tsx`, `*.mts`, `*.cts`
+
+Deferred until explicitly requested:
 
 - F#: `*.fs`, `*.fsproj`
 - VB.NET: `*.vb`, `*.vbproj`
+
+## Planned UI and Markup Support
+
+.NET product indexing should include UI/view markup because those files often contain routes, bindings, validation rules, component composition, localization keys, and view-model references.
+
+Planned inputs:
+
+- Razor and Blazor: `*.cshtml`, `*.razor`, `_ViewImports.cshtml`, `_ViewStart.cshtml`
+- Legacy ASP.NET views: `*.vbhtml`, `*.aspx`, `*.ascx`, `*.master`
+- XAML UI and resources: `*.xaml`
+- SPA/application views and templates: `*.html`, including Angular, Aurelia, and similar framework templates
+- React UI files: `*.jsx`, `*.tsx`
+- Web styles and assets where relevant: `*.css`, `*.scss`, `*.less`
+
+These analyzers should preserve route templates, directives, model types, component names, props, event handlers, bindings, resource keys, layout relationships, framework-specific template syntax, and linked code-behind files.
+
+## Planned .NET Project Metadata Support
+
+.NET indexing should include more than source files.
+
+Planned inputs:
+
+- Solutions and project files: `*.sln`, `*.slnx`, `*.csproj`
+- MSBuild shared files: `Directory.Build.props`, `Directory.Build.targets`, `Directory.Packages.props`, `*.props`, `*.targets`
+- NuGet and SDK metadata: `NuGet.config`, `global.json`, `packages.lock.json`
+- App/config files: `appsettings*.json`, `launchSettings.json`, `.editorconfig`, `.runsettings`
+- Build/deployment files where relevant: Dockerfiles, compose files, CI workflows, publish profiles, and deployment manifests
+
+These files should be indexed with metadata for target frameworks, package references, project references, SDK, nullable/implicit-usings settings, analyzers, source generators, build properties, and configuration keys.
+
+## Planned Documentation Support
+
+RagNet should also index documentation as first-class RAG content.
+
+Planned inputs:
+
+- Markdown and MDX: `README.md`, `docs/**/*.md`, `*.md`, `*.mdx`
+- HTML: `docs/**/*.html`, generated static docs, exported API docs, and checked-in product documentation sites
+- Text docs: `*.txt`, `*.rst`, `*.adoc`
+- Later: `*.pdf`, `*.docx`, and other generated documentation artifacts
+
+Documentation analyzers should preserve headings, anchors, page titles, source paths, workspace groups, and `contentType = documentation`.
+
+For one product made from one or more related projects, code and docs should use the same retrieval surface. The analyzers and chunking are different, but MCP tools should support product-scoped searches with filters for `code`, `documentation`, or both, plus retrieval modes such as `docs_first`, `code_first`, and `balanced`.
 
 ## Planned Hosting Modes
 

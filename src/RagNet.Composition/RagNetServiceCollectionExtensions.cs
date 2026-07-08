@@ -2,7 +2,11 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using RagNet.Mcp.Analyzers.CSharp;
+using RagNet.Mcp.Analyzers.Documentation;
+using RagNet.Mcp.Analyzers.DotNet;
 using RagNet.Mcp.Analyzers.Interfaces;
+using RagNet.Mcp.Analyzers.JavaScriptTypeScript;
+using RagNet.Mcp.Analyzers.Markup;
 using RagNet.Mcp.Configuration;
 using RagNet.Mcp.Embeddings;
 using RagNet.Mcp.Embeddings.Interfaces;
@@ -41,8 +45,10 @@ public static class RagNetServiceCollectionExtensions
         services.AddSingleton<IIndexedWorkspaceRegistry, IndexedWorkspaceRegistry>();
         services.AddSingleton<IWorkspaceScopeResolver, WorkspaceScopeResolver>();
         services.AddSingleton<ICodeAnalyzer, CSharpAnalyzer>();
-        // TODO: Add FSharpAnalyzer for *.fs and *.fsproj when F# symbol extraction is implemented.
-        // TODO: Add VisualBasicAnalyzer for *.vb and *.vbproj when VB.NET symbol extraction is implemented.
+        services.AddSingleton<ICodeAnalyzer, DocumentationAnalyzer>();
+        services.AddSingleton<ICodeAnalyzer, ProjectMetadataAnalyzer>();
+        services.AddSingleton<ICodeAnalyzer, JavaScriptTypeScriptAnalyzer>();
+        services.AddSingleton<ICodeAnalyzer, MarkupAnalyzer>();
         services.AddSingleton<ISourceIdentityResolver, GitSourceIdentityResolver>();
         services.AddSingleton<IWorkspaceIndexStateStore, FileWorkspaceIndexStateStore>();
         services.AddSingleton<InMemoryVectorStore>();

@@ -18,7 +18,14 @@ public sealed class OllamaEmbeddingProvider(HttpClient httpClient, IOptions<RagN
         };
 
         using var response = await httpClient.PostAsJsonAsync("/api/embeddings", request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            throw new HttpRequestException(
+                $"Ollama embedding request failed with {(int)response.StatusCode} {response.ReasonPhrase}: {body}",
+                inner: null,
+                response.StatusCode);
+        }
 
         var payload = await response.Content.ReadFromJsonAsync<OllamaEmbeddingResponse>(cancellationToken: cancellationToken);
         return payload?.Embedding ?? [];

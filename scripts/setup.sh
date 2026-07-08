@@ -3,6 +3,7 @@ set -euo pipefail
 
 MODE="${1:-Hybrid}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-mxbai-embed-large}"
+ADDITIONAL_EMBEDDING_MODELS="${ADDITIONAL_EMBEDDING_MODELS:-nomic-embed-text}"
 OLLAMA_MODE="${OLLAMA_MODE:-${2:-Auto}}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -66,22 +67,37 @@ use_ollama_container() {
 
 pull_ollama_model() {
   local use_container="$1"
+  local model="$2"
   if [[ "${SKIP_MODEL_PULL:-}" == "1" || "${SKIP_MODEL_PULL:-}" == "true" ]]; then
     return
   fi
 
   if [[ "$use_container" == "true" ]]; then
-    docker exec ollama ollama pull "$EMBEDDING_MODEL"
+    docker exec ollama ollama pull "$model"
     return
   fi
 
   if command -v ollama >/dev/null 2>&1; then
-    ollama pull "$EMBEDDING_MODEL"
+    ollama pull "$model"
     return
   fi
 
-  echo "WARNING: Local Ollama is selected, but the ollama CLI was not found. Skipping model pull for '$EMBEDDING_MODEL'." >&2
-  echo "WARNING: Run 'ollama pull $EMBEDDING_MODEL' manually if the model is not already installed." >&2
+  echo "WARNING: Local Ollama is selected, but the ollama CLI was not found. Skipping model pull for '$model'." >&2
+  echo "WARNING: Run 'ollama pull $model' manually if the model is not already installed." >&2
+}
+
+pull_ollama_models() {
+  local use_container="$1"
+  local pulled=" "
+
+  for model in "$EMBEDDING_MODEL" $ADDITIONAL_EMBEDDING_MODELS; do
+    if [[ -z "${model// }" || "$pulled" == *" $model "* ]]; then
+      continue
+    fi
+
+    pull_ollama_model "$use_container" "$model"
+    pulled="$pulled$model "
+  done
 }
 
 if [[ "$MODE" == "Docker" ]]; then
@@ -91,16 +107,16 @@ if [[ "$MODE" == "Docker" ]]; then
     exit 1
   fi
   docker compose up -d --build
-  pull_ollama_model true
+  pull_ollama_models true
 elif [[ "$MODE" == "Hybrid" ]]; then
   require_command docker
   require_command dotnet
   if use_ollama_container; then
     docker compose up -d qdrant ollama
-    pull_ollama_model true
+    pull_ollama_models true
   else
     docker compose up -d qdrant
-    pull_ollama_model false
+    pull_ollama_models false
   fi
   dotnet restore ./RagNet.Mcp.sln
   dotnet publish ./src/RagNet.Mcp/RagNet.Mcp.csproj \
@@ -120,7 +136,7 @@ else
   if [[ "$OLLAMA_MODE" == "Docker" ]]; then
     echo "WARNING: Native mode does not start Docker Ollama. Use Hybrid mode with OLLAMA_MODE=Docker if you want setup to start Ollama in Docker." >&2
   else
-    pull_ollama_model false
+    pull_ollama_models false
   fi
   dotnet restore ./RagNet.Mcp.sln
   dotnet publish ./src/RagNet.Mcp/RagNet.Mcp.csproj \

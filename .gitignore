@@ -2,6 +2,7 @@ bin/
 obj/
 .dotnet-home/
 .vs/
+.ragnet/
 *.user
 *.suo
 TestResults/

@@ -49,7 +49,14 @@ public sealed class InMemoryVectorStore : IVectorStore
         return Task.CompletedTask;
     }
 
-    public Task<IReadOnlyList<SearchResult>> SearchAsync(string workspaceRoot, float[] embedding, string query, int limit, bool hybrid, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<SearchResult>> SearchAsync(
+        string workspaceRoot,
+        float[] embedding,
+        string query,
+        int limit,
+        bool hybrid,
+        string? contentType = null,
+        CancellationToken cancellationToken = default)
     {
         List<Entry> entries;
         lock (_gate)
@@ -57,8 +64,11 @@ public sealed class InMemoryVectorStore : IVectorStore
             entries = _entriesByWorkspace.GetValueOrDefault(workspaceRoot)?.ToList() ?? [];
         }
 
+        var normalizedContentType = NormalizeContentType(contentType);
         var tokens = query.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         var results = entries
+            .Where(entry => normalizedContentType is null ||
+                string.Equals(entry.Chunk.ContentType, normalizedContentType, StringComparison.OrdinalIgnoreCase))
             .Select(entry =>
             {
                 var semanticScore = CosineSimilarity(embedding, entry.Embedding);
@@ -79,7 +89,22 @@ public sealed class InMemoryVectorStore : IVectorStore
             ? string.Concat(chunk.Content.AsSpan(0, 400), "...")
             : chunk.Content;
 
-        return new SearchResult(chunk.FilePath, chunk.SymbolName, chunk.SymbolKind, chunk.StartLine, chunk.EndLine, score, preview);
+        return new SearchResult(chunk.FilePath, chunk.SymbolName, chunk.SymbolKind, chunk.StartLine, chunk.EndLine, score, preview)
+        {
+            ContentType = chunk.ContentType,
+            Language = chunk.Language
+        };
+    }
+
+    private static string? NormalizeContentType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType) ||
+            string.Equals(contentType, IndexedContentTypes.All, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return contentType.Trim();
     }
 
     private static double KeywordScore(string text, IReadOnlyList<string> tokens)

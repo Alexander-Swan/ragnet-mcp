@@ -10,5 +10,12 @@ public interface IVectorStore
 
     Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default);
 
-    Task<IReadOnlyList<SearchResult>> SearchAsync(string workspaceRoot, float[] embedding, string query, int limit, bool hybrid, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<SearchResult>> SearchAsync(
+        string workspaceRoot,
+        float[] embedding,
+        string query,
+        int limit,
+        bool hybrid,
+        string? contentType = null,
+        CancellationToken cancellationToken = default);
 }

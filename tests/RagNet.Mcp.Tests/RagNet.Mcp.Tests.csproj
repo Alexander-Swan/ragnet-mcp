@@ -19,6 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\RagNet.Analysis\RagNet.Analysis.csproj" />
     <ProjectReference Include="..\..\src\RagNet.Core\RagNet.Core.csproj" />
     <ProjectReference Include="..\..\src\RagNet.Infrastructure\RagNet.Infrastructure.csproj" />
   </ItemGroup>

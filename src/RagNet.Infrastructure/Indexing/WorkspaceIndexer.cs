@@ -25,7 +25,7 @@ public sealed class WorkspaceIndexer(
     ISourceIdentityResolver sourceIdentityResolver,
     IOptions<RagNetOptions> options) : IWorkspaceIndexer
 {
-    private const string IndexSchemaVersion = "ragnet-index-v2/analyzers-v1";
+    private const string IndexSchemaVersion = "ragnet-index-v2/analyzers-v5";
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> IndexLocks = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly IReadOnlyList<ICodeAnalyzer> _analyzers = analyzers.ToArray();
@@ -155,6 +155,7 @@ public sealed class WorkspaceIndexer(
             Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzed, changedFiles.Length, "Analyzing changed files.");
         }
 
+        var embeddedChunks = new List<CodeChunk>(chunks.Count);
         var embeddings = new List<float[]>(chunks.Count);
         var embedded = 0;
         Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, 0, chunks.Count, "Creating embeddings.");
@@ -165,16 +166,25 @@ public sealed class WorkspaceIndexer(
                 ? chunk.Content[.._options.Indexing.ChunkMaxChars]
                 : chunk.Content;
 
-            embeddings.Add(await embeddingProvider.EmbedAsync(content, cancellationToken));
+            try
+            {
+                embeddings.Add(await embeddingProvider.EmbedAsync(content, cancellationToken));
+                embeddedChunks.Add(chunk);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException)
+            {
+                warnings.Add($"Embedding skipped for {chunk.FilePath}:{chunk.StartLine}-{chunk.EndLine} ({chunk.SymbolName}): {ex.Message}");
+            }
+
             embedded++;
             Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, embedded, chunks.Count, "Creating embeddings.");
         }
 
-        if (chunks.Count > 0)
+        if (embeddedChunks.Count > 0)
         {
-            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, 0, chunks.Count, "Writing vectors to store.");
-            await vectorStore.UpsertAsync(workspaceRoot, chunks, embeddings, cancellationToken);
-            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, chunks.Count, chunks.Count, "Writing vectors to store.");
+            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, 0, embeddedChunks.Count, "Writing vectors to store.");
+            await vectorStore.UpsertAsync(workspaceRoot, embeddedChunks, embeddings, cancellationToken);
+            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, embeddedChunks.Count, embeddedChunks.Count, "Writing vectors to store.");
         }
 
         Report(progress, workspaceRoot, IndexingProgressStage.SavingState, 0, null, "Saving index state.");
@@ -186,8 +196,8 @@ public sealed class WorkspaceIndexer(
             DateTimeOffset.UtcNow,
             StateExists: true), cancellationToken);
         indexedWorkspaceRegistry.MarkIndexed(workspaceRoot);
-        Report(progress, workspaceRoot, IndexingProgressStage.Completed, chunks.Count, chunks.Count, "Indexing completed.");
-        return new IndexWorkspaceResult(workspaceRoot, files.Length, chunks.Count, fullReindex, warnings);
+        Report(progress, workspaceRoot, IndexingProgressStage.Completed, embeddedChunks.Count, chunks.Count, "Indexing completed.");
+        return new IndexWorkspaceResult(workspaceRoot, files.Length, embeddedChunks.Count, fullReindex, warnings);
     }
 
     public async Task<IReadOnlyList<IndexWorkspaceResult>> IndexGroupAsync(
@@ -250,6 +260,8 @@ public sealed class WorkspaceIndexer(
         string? scope,
         string? workspaceRoot,
         string? workspaceGroup,
+        string? contentType = null,
+        string? retrievalMode = null,
         CancellationToken cancellationToken = default)
     {
         var embedding = await embeddingProvider.EmbedAsync(query, cancellationToken);
@@ -260,14 +272,24 @@ public sealed class WorkspaceIndexer(
         }
 
         var results = new List<SearchResult>();
+        var normalizedContentType = NormalizeContentType(contentType);
+        var normalizedRetrievalMode = NormalizeRetrievalMode(retrievalMode);
 
         foreach (var workspace in workspaces)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            results.AddRange(await vectorStore.SearchAsync(workspace.RootPath, embedding, query, limit, hybrid, cancellationToken));
+            results.AddRange(await vectorStore.SearchAsync(
+                workspace.RootPath,
+                embedding,
+                query,
+                limit,
+                hybrid,
+                normalizedContentType,
+                cancellationToken));
         }
 
         return results
+            .Select(result => ApplyRetrievalModeBoost(result, normalizedRetrievalMode))
             .OrderByDescending(result => result.Score)
             .Take(Math.Max(1, limit))
             .ToArray();
@@ -444,6 +466,58 @@ public sealed class WorkspaceIndexer(
         => state.StateExists &&
             string.Equals(state.EmbeddingModel, _options.Ollama.EmbeddingModel, StringComparison.Ordinal) &&
             string.Equals(state.SchemaVersion, IndexSchemaVersion, StringComparison.Ordinal);
+
+    private static string? NormalizeContentType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType) ||
+            string.Equals(contentType, IndexedContentTypes.All, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var normalized = contentType.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            IndexedContentTypes.Code or
+                IndexedContentTypes.Documentation or
+                IndexedContentTypes.Markup or
+                IndexedContentTypes.ProjectMetadata => normalized,
+            _ => throw new ArgumentException(
+                $"Unsupported content_type '{contentType}'. Use code, documentation, markup, project_metadata, or all.",
+                nameof(contentType))
+        };
+    }
+
+    private static string NormalizeRetrievalMode(string? retrievalMode)
+    {
+        if (string.IsNullOrWhiteSpace(retrievalMode))
+        {
+            return RetrievalModes.Balanced;
+        }
+
+        var normalized = retrievalMode.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            RetrievalModes.Balanced or RetrievalModes.DocsFirst or RetrievalModes.CodeFirst => normalized,
+            _ => throw new ArgumentException(
+                $"Unsupported retrieval_mode '{retrievalMode}'. Use balanced, docs_first, or code_first.",
+                nameof(retrievalMode))
+        };
+    }
+
+    private static SearchResult ApplyRetrievalModeBoost(SearchResult result, string retrievalMode)
+    {
+        var multiplier = retrievalMode switch
+        {
+            RetrievalModes.DocsFirst when string.Equals(result.ContentType, IndexedContentTypes.Documentation, StringComparison.OrdinalIgnoreCase) => 1.15d,
+            RetrievalModes.DocsFirst when string.Equals(result.ContentType, IndexedContentTypes.ProjectMetadata, StringComparison.OrdinalIgnoreCase) => 1.05d,
+            RetrievalModes.CodeFirst when string.Equals(result.ContentType, IndexedContentTypes.Code, StringComparison.OrdinalIgnoreCase) => 1.15d,
+            RetrievalModes.CodeFirst when string.Equals(result.ContentType, IndexedContentTypes.Markup, StringComparison.OrdinalIgnoreCase) => 1.05d,
+            _ => 1d
+        };
+
+        return multiplier == 1d ? result : result with { Score = result.Score * multiplier };
+    }
 
     private void EnsureAllowedWorkspaceRoot(string workspaceRoot)
         => EnsureAllowedPath(workspaceRoot);

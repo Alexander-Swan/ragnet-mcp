@@ -111,7 +111,14 @@ public sealed class QdrantVectorStore(
         logger.LogInformation("Deleted Qdrant collection {CollectionName}.", collectionName);
     }
 
-    public async Task<IReadOnlyList<SearchResult>> SearchAsync(string workspaceRoot, float[] embedding, string query, int limit, bool hybrid, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<SearchResult>> SearchAsync(
+        string workspaceRoot,
+        float[] embedding,
+        string query,
+        int limit,
+        bool hybrid,
+        string? contentType = null,
+        CancellationToken cancellationToken = default)
     {
         if (embedding.Length == 0)
         {
@@ -125,6 +132,7 @@ public sealed class QdrantVectorStore(
         }
 
         var candidateLimit = Math.Max(1, limit) * (hybrid ? HybridCandidateMultiplier : 1);
+        var filter = CreateSearchFilter(workspaceRoot, contentType);
         var response = await _httpClient.PostAsJsonAsync(
             $"collections/{Uri.EscapeDataString(collectionName)}/points/query",
             new
@@ -133,13 +141,7 @@ public sealed class QdrantVectorStore(
                 limit = candidateLimit,
                 with_payload = true,
                 with_vector = false,
-                filter = new
-                {
-                    must = new[]
-                    {
-                        MatchKeyword("workspace_id", QdrantCollectionNaming.GetWorkspaceId(workspaceRoot))
-                    }
-                }
+                filter
             },
             JsonOptions,
             cancellationToken);
@@ -257,6 +259,7 @@ public sealed class QdrantVectorStore(
             source_project_id = chunk.Source?.ProjectId,
             is_git_repository = chunk.Source?.IsGitRepository ?? false,
             file_path = NormalizePath(chunk.FilePath),
+            content_type = chunk.ContentType,
             language = chunk.Language,
             symbol_name = chunk.SymbolName,
             symbol_kind = chunk.SymbolKind,
@@ -284,7 +287,11 @@ public sealed class QdrantVectorStore(
             GetInt32(payload, "start_line"),
             GetInt32(payload, "end_line"),
             semanticScore + keywordScore,
-            GetString(payload, "preview"));
+            GetString(payload, "preview"))
+        {
+            ContentType = GetString(payload, "content_type"),
+            Language = GetString(payload, "language")
+        };
     }
 
     private static string GetString(JsonElement element, string name)
@@ -306,6 +313,33 @@ public sealed class QdrantVectorStore(
                 value
             }
         };
+
+    private static object CreateSearchFilter(string workspaceRoot, string? contentType)
+    {
+        var must = new List<object>
+        {
+            MatchKeyword("workspace_id", QdrantCollectionNaming.GetWorkspaceId(workspaceRoot))
+        };
+
+        var normalizedContentType = NormalizeContentType(contentType);
+        if (normalizedContentType is not null)
+        {
+            must.Add(MatchKeyword("content_type", normalizedContentType));
+        }
+
+        return new { must };
+    }
+
+    private static string? NormalizeContentType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType) ||
+            string.Equals(contentType, IndexedContentTypes.All, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return contentType.Trim();
+    }
 
     private static string CreatePointId(string workspaceId, string chunkId)
     {
