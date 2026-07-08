@@ -1283,7 +1283,7 @@ public sealed class WorkspaceIndexer(
             IndexProfiles.Frontend => IndexProfiles.Frontend,
             IndexProfiles.Tests => IndexProfiles.Tests,
             _ => throw new ArgumentException(
-                $"Unsupported search_profile '{searchProfile}'. Use all, code, docs, metadata, frontend, or tests.",
+                $"Unsupported search_profile '{searchProfile}'. Use {string.Join(", ", IndexProfiles.Supported)}.",
                 nameof(searchProfile))
         };
     }

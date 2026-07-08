@@ -9,6 +9,16 @@ public static class IndexProfiles
     public const string Tests = "tests";
     public const string Frontend = "frontend";
 
+    public static readonly IReadOnlyList<string> Supported =
+    [
+        All,
+        Code,
+        Documentation,
+        Metadata,
+        Frontend,
+        Tests
+    ];
+
     public static string Normalize(string? profile)
     {
         if (string.IsNullOrWhiteSpace(profile))
@@ -26,7 +36,7 @@ public static class IndexProfiles
             Tests or "test" => Tests,
             Frontend or "ui" or "web" => Frontend,
             _ => throw new ArgumentException(
-                $"Unsupported profile '{profile}'. Use code, docs, metadata, tests, frontend, or all.",
+                $"Unsupported profile '{profile}'. Use {string.Join(", ", Supported)}.",
                 nameof(profile))
         };
     }

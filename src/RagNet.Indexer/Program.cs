@@ -123,6 +123,12 @@ static async Task<int> RunAsync(
     }
 
     var command = args[0].Trim().ToLowerInvariant();
+    if (command is "profiles" or "profile" or "--profile" or "-p")
+    {
+        WriteProfilesTable();
+        return 0;
+    }
+
     var optionStart = GetOptionStart(command, args);
     var options = ParseOptions(args.Skip(optionStart));
     var progress = GetBool(options, "no-progress")
@@ -225,6 +231,11 @@ static async Task<int> RunAsync(
             var target = RequiredListTarget(args);
             switch (target)
             {
+                case "profiles":
+                case "profile":
+                    WriteProfilesTable();
+                    return 0;
+
                 case "groups":
                     WriteGroupsTable(await workspaceGroupRegistry.GetGroupsAsync());
                     return 0;
@@ -234,7 +245,7 @@ static async Task<int> RunAsync(
                     return 0;
 
                 default:
-                    throw new ArgumentException("List target must be one of: groups, workspaces.");
+                    throw new ArgumentException("List target must be one of: groups, profiles, workspaces.");
             }
         }
 
@@ -565,6 +576,29 @@ static void WriteGroupsTable(IReadOnlyList<WorkspaceGroupRecord> groups)
     WriteTable(["Name", "Source", "Roots", "Targets", "Read Only", "Excludes"], rows);
 }
 
+static void WriteProfilesTable()
+{
+    var descriptions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        [IndexProfiles.All] = "All indexable content.",
+        [IndexProfiles.Code] = "Application and library source code.",
+        [IndexProfiles.Documentation] = "Documentation files such as Markdown, HTML docs, and text docs.",
+        [IndexProfiles.Metadata] = ".NET project, solution, package, and configuration metadata.",
+        [IndexProfiles.Frontend] = "Frontend views and UI source such as HTML views, JSX, TSX, and XAML.",
+        [IndexProfiles.Tests] = "Test projects and test files."
+    };
+
+    var rows = IndexProfiles.Supported
+        .Select(profile => new[]
+        {
+            profile,
+            descriptions[profile]
+        })
+        .ToArray();
+
+    WriteTable(["Profile", "Description"], rows);
+}
+
 static void WriteWorkspacesTable(IReadOnlyList<IndexedWorkspaceRecord> workspaces)
 {
     var rows = workspaces
@@ -784,8 +818,10 @@ static void WriteHelp()
       index       --group|-g <name> [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
       status      --workspace <path>
       eval        --queries <eval.json> [--workspace-root <path>|--group <name>] [--limit <n>] [--hybrid] [--search-profile <profile>]
+      profiles
       create      group <name> --workspace|-w <indexed-name-or-root> [--workspace|-w <indexed-name-or-root> ...] [--current|-c] [--add|-a]
       list        groups
+      list        profiles
       list        workspaces
       delete      group <name>
       delete      workspace <workspace-root>
@@ -812,6 +848,7 @@ static void WriteHelp()
       ragnet-indexer index --group my-product --force
       ragnet-indexer status --workspace D:\Work\Product\Api
       ragnet-indexer eval --queries eval.json --workspace-root D:\Work\Product\Api --limit 10 --hybrid
+      ragnet-indexer profiles
       ragnet-indexer list groups
       ragnet-indexer list workspaces
       ragnet-indexer delete group my-product
