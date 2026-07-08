@@ -26,7 +26,8 @@ public sealed class FileWorkspaceIndexStateStore : IWorkspaceIndexStateStore
                 Path.GetFullPath(file.FilePath),
                 file.Fingerprint,
                 file.Size,
-                file.LastWriteTimeUtc), StringComparer.OrdinalIgnoreCase)
+                file.LastWriteTimeUtc,
+                file.ChunkCount), StringComparer.OrdinalIgnoreCase)
             ?? new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase);
 
         return new WorkspaceIndexState(

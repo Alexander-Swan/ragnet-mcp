@@ -94,7 +94,8 @@ public sealed class QdrantWorkspaceIndexStateStore(
                                     file_path = NormalizePath(file.FilePath),
                                     fingerprint = file.Fingerprint,
                                     size = file.Size,
-                                    last_write_time_utc = file.LastWriteTimeUtc
+                                    last_write_time_utc = file.LastWriteTimeUtc,
+                                    chunk_count = file.ChunkCount
                                 })
                                 .ToArray()
                         }
@@ -217,7 +218,8 @@ public sealed class QdrantWorkspaceIndexStateStore(
             NormalizePath(filePath),
             fingerprint,
             GetInt64(element, "size"),
-            GetDateTimeOffset(element, "last_write_time_utc"));
+            GetDateTimeOffset(element, "last_write_time_utc"),
+            GetInt32(element, "chunk_count"));
     }
 
     private static WorkspaceIndexState Empty(string workspaceRoot)
@@ -252,6 +254,11 @@ public sealed class QdrantWorkspaceIndexStateStore(
         => element.TryGetProperty(name, out var value) && value.TryGetInt64(out var result)
             ? result
             : 0L;
+
+    private static int GetInt32(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value) && value.TryGetInt32(out var result)
+            ? result
+            : 0;
 
     private static DateTimeOffset GetDateTimeOffset(JsonElement element, string name)
         => element.TryGetProperty(name, out var value) && value.TryGetDateTimeOffset(out var result)

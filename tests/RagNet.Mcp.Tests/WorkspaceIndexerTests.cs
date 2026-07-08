@@ -28,7 +28,7 @@ public sealed class WorkspaceIndexerTests
             workspace.RootPath,
             FileState(unchanged),
             FileState(changed, fingerprint: "old-fingerprint"),
-            new IndexedFileState(Path.GetFullPath(removed), "removed-fingerprint", 10, DateTimeOffset.UtcNow)));
+            new IndexedFileState(Path.GetFullPath(removed), "removed-fingerprint", 10, DateTimeOffset.UtcNow, ChunkCount: 1)));
         var vectorStore = new FakeVectorStore();
         var analyzer = new FakeAnalyzer();
         var indexer = CreateIndexer(workspace.RootPath, stateStore, vectorStore, analyzer);
@@ -56,7 +56,7 @@ public sealed class WorkspaceIndexerTests
             workspace.RootPath,
             FileState(unchanged),
             FileState(changed, fingerprint: "old-fingerprint"),
-            new IndexedFileState(Path.GetFullPath(removed), "removed-fingerprint", 10, DateTimeOffset.UtcNow)));
+            new IndexedFileState(Path.GetFullPath(removed), "removed-fingerprint", 10, DateTimeOffset.UtcNow, ChunkCount: 1)));
         var vectorStore = new FakeVectorStore();
         var analyzer = new FakeAnalyzer();
         var embeddingProvider = new FakeEmbeddingProvider();
@@ -69,11 +69,23 @@ public sealed class WorkspaceIndexerTests
         Assert.Equal(IndexProfiles.All, result.IndexProfile);
         Assert.Equal(2, result.FilesScanned);
         Assert.Equal(1, result.ChunksThatWouldBeIndexed);
+        Assert.Equal(2, result.ChunksThatWouldBeDeleted);
+        Assert.Equal(2, result.TotalChunksAfterIndex);
         Assert.False(result.FullReindex);
         Assert.True(result.StateCompatible);
         Assert.Equal(1, result.ChangedFiles);
         Assert.Equal(1, result.DeletedFiles);
         Assert.Equal(1, result.UnchangedFiles);
+        Assert.Contains(result.FileChunkEstimates, file =>
+            string.Equals(file.FilePath, Path.GetFullPath(changed), StringComparison.OrdinalIgnoreCase) &&
+            file.CurrentChunks == 1 &&
+            file.EstimatedChunksToEmbed == 1 &&
+            file.EstimatedChunksToDelete == 1);
+        Assert.Contains(result.FileChunkEstimates, file =>
+            string.Equals(file.FilePath, Path.GetFullPath(removed), StringComparison.OrdinalIgnoreCase) &&
+            file.CurrentChunks == 1 &&
+            file.EstimatedChunksToEmbed == 0 &&
+            file.EstimatedChunksToDelete == 1);
         Assert.Equal([Path.GetFullPath(changed)], analyzer.AnalyzedFiles);
         Assert.Empty(vectorStore.DeletedFiles);
         Assert.Empty(vectorStore.UpsertedChunks);
@@ -102,6 +114,30 @@ public sealed class WorkspaceIndexerTests
 
         Assert.Equal(Path.GetFullPath(workspace.RootPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), result.WorkspaceRoot);
         Assert.Equal([Path.GetFullPath(sourceFile)], analyzer.AnalyzedFiles);
+    }
+
+    [Fact]
+    public async Task IndexAsync_NoOpIncrementalRunPreservesRegistryTotalChunks()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var sourceFile = workspace.WriteFile("src/Program.cs", "program");
+        var stateStore = new FakeStateStore(State(
+            workspace.RootPath,
+            FileState(sourceFile, chunkCount: 3)));
+        var registry = new FakeIndexedWorkspaceRegistry();
+        registry.Records.Add(IndexedWorkspace(workspace.RootPath, chunksIndexed: 3));
+        var vectorStore = new FakeVectorStore();
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(workspace.RootPath, stateStore, vectorStore, analyzer, registry);
+
+        var result = await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal(0, result.ChunksIndexed);
+        Assert.Equal(3, result.TotalChunksIndexed);
+        Assert.Empty(analyzer.AnalyzedFiles);
+        Assert.Empty(vectorStore.UpsertedChunks);
+        Assert.Equal(3, registry.Records[^1].ChunksIndexed);
+        Assert.Equal(3, Assert.Single(stateStore.SavedState!.Files.Values).ChunkCount);
     }
 
     [Fact]
@@ -160,20 +196,67 @@ public sealed class WorkspaceIndexerTests
         workspace.WriteFile("src/First.cs", "first");
         workspace.WriteFile("src/Second.cs", "second");
         var vectorStore = new FakeVectorStore();
-        var embeddingProvider = new FakeEmbeddingProvider((_, _) =>
-            throw new EmbeddingModelNotFoundException("missing-model", "model missing"));
+        var analyzer = new FakeAnalyzer();
+        var embeddingProvider = new FakeEmbeddingProvider(
+            resolveException: new EmbeddingModelNotFoundException(
+                "missing-model",
+                "model missing",
+                [new EmbeddingModelInfo("nomic-embed-text:latest")],
+                "nomic-embed-text",
+                fallbackAvailable: true));
         var indexer = CreateIndexer(
             workspace.RootPath,
             new FakeStateStore(State(workspace.RootPath)),
             vectorStore,
-            new FakeAnalyzer(),
+            analyzer,
             embeddingProvider: embeddingProvider);
 
         var exception = await Assert.ThrowsAsync<EmbeddingModelNotFoundException>(
             () => indexer.IndexTargetsAsync([workspace.RootPath]));
 
         Assert.Equal("missing-model", exception.Model);
+        Assert.True(exception.FallbackAvailable);
+        Assert.Equal(1, embeddingProvider.ResolveCallCount);
+        Assert.Equal(0, embeddingProvider.EmbedCallCount);
+        Assert.Empty(analyzer.AnalyzedFiles);
         Assert.Empty(vectorStore.UpsertedChunks);
+    }
+
+    [Fact]
+    public async Task IndexTargetsAsync_ConfiguredFallbackUsesResolvedInstalledModel()
+    {
+        using var workspace = new TemporaryWorkspace();
+        workspace.WriteFile("src/First.cs", "first");
+        var stateStore = new FakeStateStore(State(workspace.RootPath));
+        var embeddingProvider = new FakeEmbeddingProvider(
+            modelResolution: new EmbeddingModelResolution(
+                "missing-model",
+                "nomic-embed-text",
+                UsedFallback: true,
+                [new EmbeddingModelInfo("nomic-embed-text:latest")],
+                "Ollama embedding model 'missing-model' is not installed; using configured fallback 'nomic-embed-text'."));
+        var options = new RagNetOptions
+        {
+            Ollama = new OllamaOptions
+            {
+                EmbeddingModel = "missing-model",
+                AllowInstalledEmbeddingModelFallback = true
+            }
+        };
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            stateStore,
+            new FakeVectorStore(),
+            new FakeAnalyzer(),
+            embeddingProvider: embeddingProvider,
+            options: options);
+
+        var result = await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal(1, result.ChunksIndexed);
+        Assert.Equal("nomic-embed-text", stateStore.SavedState!.EmbeddingModel);
+        Assert.Contains(result.Warnings, warning => warning.Contains("using configured fallback 'nomic-embed-text'", StringComparison.Ordinal));
+        Assert.Equal(1, embeddingProvider.ResolveCallCount);
     }
 
     [Fact]
@@ -524,16 +607,21 @@ public sealed class WorkspaceIndexerTests
         FakeIndexedWorkspaceRegistry? registry = null,
         FakeEmbeddingProvider? embeddingProvider = null,
         RagNetOptions? options = null)
-        => new(
+    {
+        var provider = embeddingProvider ?? new FakeEmbeddingProvider();
+        return new(
             new FakeWorkspaceDetector(workspaceRoot),
             new FakeWorkspaceScopeResolver(workspaceRoot),
             registry ?? new FakeIndexedWorkspaceRegistry(),
+            new FakeWorkspaceGroupRegistry(),
             [analyzer],
             stateStore,
-            embeddingProvider ?? new FakeEmbeddingProvider(),
+            provider,
+            provider,
             vectorStore,
             new FakeSourceIdentityResolver(),
             Options.Create(options ?? new RagNetOptions()));
+    }
 
     private static WorkspaceIndexState State(
         string workspaceRoot,
@@ -552,7 +640,7 @@ public sealed class WorkspaceIndexerTests
             DateTimeOffset.UtcNow,
             StateExists: true);
 
-    private static IndexedFileState FileState(string filePath, string? fingerprint = null)
+    private static IndexedFileState FileState(string filePath, string? fingerprint = null, int chunkCount = 1)
     {
         var fullPath = Path.GetFullPath(filePath);
         var info = new FileInfo(fullPath);
@@ -560,10 +648,11 @@ public sealed class WorkspaceIndexerTests
             fullPath,
             fingerprint ?? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(fullPath))),
             info.Length,
-            info.LastWriteTimeUtc);
+            info.LastWriteTimeUtc,
+            chunkCount);
     }
 
-    private static IndexedWorkspaceRecord IndexedWorkspace(string workspaceRoot)
+    private static IndexedWorkspaceRecord IndexedWorkspace(string workspaceRoot, int chunksIndexed = 1)
     {
         var normalizedRoot = Path.GetFullPath(workspaceRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         return new IndexedWorkspaceRecord(
@@ -574,7 +663,7 @@ public sealed class WorkspaceIndexerTests
             [normalizedRoot],
             DateTimeOffset.UtcNow,
             FilesScanned: 1,
-            ChunksIndexed: 1,
+            ChunksIndexed: chunksIndexed,
             FullReindex: false);
     }
 
@@ -638,6 +727,25 @@ public sealed class WorkspaceIndexerTests
         }
     }
 
+    private sealed class FakeWorkspaceGroupRegistry : IWorkspaceGroupRegistry
+    {
+        public Task<IReadOnlyList<WorkspaceGroupRecord>> GetGroupsAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<WorkspaceGroupRecord>>([]);
+
+        public Task<WorkspaceGroupRecord?> GetGroupAsync(string name, CancellationToken cancellationToken = default)
+            => Task.FromResult<WorkspaceGroupRecord?>(null);
+
+        public Task<WorkspaceGroupRecord> SaveGroupAsync(
+            string name,
+            IReadOnlyList<string> roots,
+            IReadOnlyList<string>? excludeDirectories = null,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(new WorkspaceGroupRecord(name, WorkspaceGroupSources.Local, roots, excludeDirectories ?? [], IsReadOnly: false));
+
+        public Task DeleteGroupAsync(string name, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+    }
+
     private sealed class FakeStateStore(WorkspaceIndexState state) : IWorkspaceIndexStateStore
     {
         public WorkspaceIndexState? SavedState { get; private set; }
@@ -656,17 +764,42 @@ public sealed class WorkspaceIndexerTests
     }
 
     private sealed class FakeEmbeddingProvider(
-        Func<string, CancellationToken, Task<float[]>>? embedAsync = null) : IEmbeddingProvider
+        Func<string, CancellationToken, Task<float[]>>? embedAsync = null,
+        EmbeddingModelResolution? modelResolution = null,
+        Exception? resolveException = null) : IEmbeddingProvider, IEmbeddingModelCatalog
     {
         private int _activeEmbeds;
         private int _embedCallCount;
         private int _maxObservedConcurrency;
+        private int _resolveCallCount;
 
         public int EmbedCallCount => Volatile.Read(ref _embedCallCount);
+
+        public int ResolveCallCount => Volatile.Read(ref _resolveCallCount);
 
         public int MaxObservedConcurrency => Volatile.Read(ref _maxObservedConcurrency);
 
         public List<int> BatchSizes { get; } = [];
+
+        public Task<IReadOnlyList<EmbeddingModelInfo>> ListInstalledModelsAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<EmbeddingModelInfo>>(
+                modelResolution?.InstalledModels ?? [new EmbeddingModelInfo("mxbai-embed-large:latest")]);
+
+        public Task<EmbeddingModelResolution> ResolveEmbeddingModelAsync(CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _resolveCallCount);
+            if (resolveException is not null)
+            {
+                throw resolveException;
+            }
+
+            return Task.FromResult(modelResolution ?? new EmbeddingModelResolution(
+                "mxbai-embed-large",
+                "mxbai-embed-large",
+                UsedFallback: false,
+                [new EmbeddingModelInfo("mxbai-embed-large:latest")],
+                Message: null));
+        }
 
         public async Task<float[]> EmbedAsync(string text, CancellationToken cancellationToken = default)
             => (await EmbedBatchAsync([text], cancellationToken))[0];

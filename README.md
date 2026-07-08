@@ -130,6 +130,50 @@ Use `list groups` to see configured and local indexer groups in a table. Use `li
 
 The indexer is intended to run where source files are accessible: directly on a developer machine for local projects, or in CI/webhook workers after checking out a repository. The web MCP/search service remains HTTP-based and queries Qdrant.
 
+## Search Quality Evaluation
+
+Run a search eval suite against the existing search pipeline with:
+
+```powershell
+.\bin\ragnet-indexer.exe eval --queries eval.json --workspace-root "D:\Work\Product\Api" --limit 10 --hybrid
+```
+
+`eval` prints JSON containing aggregate metrics and per-query ranked results. It exits `0` when every query has a matching result and `2` when one or more queries miss, which makes it suitable for CI thresholds or local regression checks. The command uses `IWorkspaceIndexer.SearchAsync`; it does not duplicate retrieval logic.
+
+Example `eval.json`:
+
+```json
+{
+  "limit": 10,
+  "hybrid": true,
+  "searchProfile": "code",
+  "queries": [
+    {
+      "name": "order persistence",
+      "query": "where are orders saved?",
+      "expected": {
+        "file": "src/Orders/OrderService.cs",
+        "symbol": "OrderService",
+        "contentContains": "SaveAsync"
+      }
+    },
+    {
+      "name": "routing docs",
+      "query": "how are admin routes configured?",
+      "searchProfile": "docs",
+      "expectedResults": [
+        {
+          "fileContains": "docs/routes",
+          "contentContains": "admin"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Suite-level defaults can include `limit`, `hybrid`, `filePath`, `scope`, `workspaceRoot`, `workspaceGroup`, `contentType`, `retrievalMode`, and `searchProfile`. Each query can override those same fields. Expected filters are case-insensitive and can use `file`, `fileContains`, `symbol`, `symbolContains`, `contentContains`, `contentType`, and `indexProfile`.
+
 ## Planned Architecture TODO
 
 RagNet should support both local-only and hosted/team usage without forcing the same indexing mechanics into both modes:
@@ -143,6 +187,8 @@ RagNet should support both local-only and hosted/team usage without forcing the 
 - Store enough source metadata in vector payloads for hosted search: repository URL, commit SHA, relative path, symbol details, line numbers, and chunk content. A cloud-hosted search service cannot read `D:\...` local files, so context must come from indexed payloads or a repo checkout/object store.
 - Keep full Docker indexing optional. Since `ragnet-mcp` runs in Docker by default, arbitrary host workspace paths should be indexed with the local indexer unless those paths are mounted or synced into the container.
 - Continue hardening setup for less common local environments and hosted/team deployment paths.
+
+See [HOSTED_INDEXING.md](HOSTED_INDEXING.md) for the hosted worker/job lifecycle design.
 
 ## Documentation Indexing TODO
 

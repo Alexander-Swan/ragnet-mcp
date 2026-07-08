@@ -11,6 +11,7 @@ using RagNet.Mcp.Configuration;
 using RagNet.Mcp.Embeddings;
 using RagNet.Mcp.Embeddings.Interfaces;
 using RagNet.Mcp.Indexing;
+using RagNet.Mcp.Indexing.Evaluation;
 using RagNet.Mcp.Indexing.Interfaces;
 using RagNet.Mcp.Source;
 using RagNet.Mcp.Source.Interfaces;
@@ -23,13 +24,15 @@ namespace RagNet.Mcp.Composition;
 
 public static class RagNetServiceCollectionExtensions
 {
+    private const string OllamaHttpClientName = "RagNet.Ollama";
+
     public static IServiceCollection AddRagNetIndexingServices(
         this IServiceCollection services,
         IConfiguration configuration)
     {
         services.Configure<RagNetOptions>(configuration.GetSection(RagNetOptions.SectionName));
 
-        services.AddHttpClient<IEmbeddingProvider, OllamaEmbeddingProvider>((serviceProvider, client) =>
+        services.AddHttpClient(OllamaHttpClientName, (serviceProvider, client) =>
         {
             var options = serviceProvider.GetRequiredService<IOptions<RagNetOptions>>().Value;
             client.BaseAddress = new Uri(options.Ollama.BaseUrl);
@@ -47,12 +50,26 @@ public static class RagNetServiceCollectionExtensions
             client.BaseAddress = new Uri(options.Qdrant.BaseUrl);
         });
 
+        services.AddHttpClient<QdrantWorkspaceGroupRegistry>((serviceProvider, client) =>
+        {
+            var options = serviceProvider.GetRequiredService<IOptions<RagNetOptions>>().Value;
+            client.BaseAddress = new Uri(options.Qdrant.BaseUrl);
+        });
+
         services.AddHttpClient<QdrantWorkspaceIndexStateStore>((serviceProvider, client) =>
         {
             var options = serviceProvider.GetRequiredService<IOptions<RagNetOptions>>().Value;
             client.BaseAddress = new Uri(options.Qdrant.BaseUrl);
         });
 
+        services.AddSingleton(serviceProvider =>
+        {
+            var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
+            var options = serviceProvider.GetRequiredService<IOptions<RagNetOptions>>();
+            return new OllamaEmbeddingProvider(httpClientFactory.CreateClient(OllamaHttpClientName), options);
+        });
+        services.AddSingleton<IEmbeddingProvider>(serviceProvider => serviceProvider.GetRequiredService<OllamaEmbeddingProvider>());
+        services.AddSingleton<IEmbeddingModelCatalog>(serviceProvider => serviceProvider.GetRequiredService<OllamaEmbeddingProvider>());
         services.AddSingleton<IWorkspaceDetector, WorkspaceDetector>();
         services.AddSingleton<IWorkspaceScopeResolver, WorkspaceScopeResolver>();
         services.AddSingleton<ICodeAnalyzer, CSharpAnalyzer>();
@@ -65,7 +82,9 @@ public static class RagNetServiceCollectionExtensions
         services.AddSingleton<InMemoryVectorStore>();
         services.AddSingleton<IVectorStore>(serviceProvider => serviceProvider.GetRequiredService<QdrantVectorStore>());
         services.AddSingleton<IIndexedWorkspaceRegistry>(serviceProvider => serviceProvider.GetRequiredService<QdrantIndexedWorkspaceRegistry>());
+        services.AddSingleton<IWorkspaceGroupRegistry>(serviceProvider => serviceProvider.GetRequiredService<QdrantWorkspaceGroupRegistry>());
         services.AddSingleton<IWorkspaceIndexer, WorkspaceIndexer>();
+        services.AddSingleton<ISearchEvaluationService, SearchEvaluationService>();
         services.AddSingleton<IIndexingJobQueue, InMemoryIndexingJobQueue>();
 
         return services;

@@ -39,7 +39,7 @@ public sealed class QdrantWorkspaceIndexStateStoreTests
             workspaceRoot,
             new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase)
             {
-                [filePath] = new IndexedFileState(filePath, "abc123", 42, savedAt)
+                [filePath] = new IndexedFileState(filePath, "abc123", 42, savedAt, ChunkCount: 7)
             },
             "test-model",
             "test-schema",
@@ -60,6 +60,7 @@ public sealed class QdrantWorkspaceIndexStateStoreTests
         Assert.Equal("test-model", payload.GetProperty("embedding_model").GetString());
         Assert.Equal("test-schema", payload.GetProperty("schema_version").GetString());
         Assert.Equal("abc123", payload.GetProperty("files")[0].GetProperty("fingerprint").GetString());
+        Assert.Equal(7, payload.GetProperty("files")[0].GetProperty("chunk_count").GetInt32());
     }
 
     [Fact]
@@ -85,7 +86,8 @@ public sealed class QdrantWorkspaceIndexStateStoreTests
                         "file_path": {{JsonSerializer.Serialize(filePath)}},
                         "fingerprint": "abc123",
                         "size": 42,
-                        "last_write_time_utc": "2026-07-07T12:34:56+00:00"
+                        "last_write_time_utc": "2026-07-07T12:34:56+00:00",
+                        "chunk_count": 5
                       }
                     ]
                   }
@@ -104,6 +106,7 @@ public sealed class QdrantWorkspaceIndexStateStoreTests
         Assert.Equal(Path.GetFullPath(filePath), fileState.FilePath);
         Assert.Equal("abc123", fileState.Fingerprint);
         Assert.Equal(42, fileState.Size);
+        Assert.Equal(5, fileState.ChunkCount);
     }
 
     [Fact]

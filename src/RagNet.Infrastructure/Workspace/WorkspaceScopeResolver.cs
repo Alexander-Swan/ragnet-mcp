@@ -1,5 +1,3 @@
-using Microsoft.Extensions.Options;
-using RagNet.Mcp.Configuration;
 using RagNet.Mcp.Workspace.Interfaces;
 
 namespace RagNet.Mcp.Workspace;
@@ -7,10 +5,8 @@ namespace RagNet.Mcp.Workspace;
 public sealed class WorkspaceScopeResolver(
     IWorkspaceDetector workspaceDetector,
     IIndexedWorkspaceRegistry indexedWorkspaceRegistry,
-    IOptions<RagNetOptions> options) : IWorkspaceScopeResolver
+    IWorkspaceGroupRegistry workspaceGroupRegistry) : IWorkspaceScopeResolver
 {
-    private readonly RagNetOptions _options = options.Value;
-
     public async Task<IReadOnlyList<WorkspaceInfo>> ResolveAsync(
         string? filePath,
         string? scope,
@@ -34,10 +30,10 @@ public sealed class WorkspaceScopeResolver(
 
     private async Task<IReadOnlyList<WorkspaceInfo>> ResolveGroupAsync(string groupName, CancellationToken cancellationToken)
     {
-        var group = _options.WorkspaceGroups.FirstOrDefault(candidate => string.Equals(candidate.Name, groupName, StringComparison.OrdinalIgnoreCase));
+        var group = await workspaceGroupRegistry.GetGroupAsync(groupName, cancellationToken);
         if (group is null)
         {
-            throw new InvalidOperationException($"Workspace group '{groupName}' was not found in configuration.");
+            throw new InvalidOperationException($"Workspace group '{groupName}' was not found.");
         }
 
         var workspaces = new List<WorkspaceInfo>();

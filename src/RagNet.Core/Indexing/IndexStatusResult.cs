@@ -5,7 +5,9 @@ public sealed record IndexStatusResult(
     bool StateExists,
     DateTimeOffset? LastIndexedAtUtc,
     int IndexedFileCount,
+    int TotalChunkCount,
     string? EmbeddingModel,
     string? SchemaVersion,
     bool NeedsFullReindex,
+    IReadOnlyList<IndexFileChunkEstimate> Files,
     IReadOnlyList<string> Warnings);

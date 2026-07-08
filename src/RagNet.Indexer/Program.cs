@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using RagNet.Mcp.Composition;
 using RagNet.Mcp.Configuration;
 using RagNet.Mcp.Embeddings;
+using RagNet.Mcp.Indexing.Evaluation;
 using RagNet.Mcp.Indexing;
 using RagNet.Mcp.Indexing.Interfaces;
 using RagNet.Mcp.Storage.Interfaces;
@@ -26,13 +27,15 @@ builder.Services.AddRagNetIndexingServices(builder.Configuration);
 using var host = builder.Build();
 var indexer = host.Services.GetRequiredService<IWorkspaceIndexer>();
 var workspaceRegistry = host.Services.GetRequiredService<IIndexedWorkspaceRegistry>();
+var workspaceGroupRegistry = host.Services.GetRequiredService<IWorkspaceGroupRegistry>();
 var vectorStore = host.Services.GetRequiredService<IVectorStore>();
 var stateStore = host.Services.GetRequiredService<IWorkspaceIndexStateStore>();
+var searchEvaluationService = host.Services.GetRequiredService<ISearchEvaluationService>();
 var ragNetOptions = host.Services.GetRequiredService<IOptions<RagNetOptions>>().Value;
 
 try
 {
-    return await RunAsync(indexer, workspaceRegistry, vectorStore, stateStore, ragNetOptions, args);
+    return await RunAsync(indexer, workspaceRegistry, workspaceGroupRegistry, vectorStore, stateStore, searchEvaluationService, ragNetOptions, args);
 }
 catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
 {
@@ -106,8 +109,10 @@ static string GetInnermostMessage(Exception exception)
 static async Task<int> RunAsync(
     IWorkspaceIndexer indexer,
     IIndexedWorkspaceRegistry workspaceRegistry,
+    IWorkspaceGroupRegistry workspaceGroupRegistry,
     IVectorStore vectorStore,
     IWorkspaceIndexStateStore stateStore,
+    ISearchEvaluationService searchEvaluationService,
     RagNetOptions ragNetOptions,
     string[] args)
 {
@@ -156,7 +161,7 @@ static async Task<int> RunAsync(
 
             if (!dryRun && !string.IsNullOrWhiteSpace(group))
             {
-                await SaveLocalWorkspaceGroupAsync(group, workspaces, GetBool(options, "add"), workspaceRegistry);
+                await SaveWorkspaceGroupAsync(group, workspaces, GetBool(options, "add"), workspaceRegistry, workspaceGroupRegistry);
             }
 
             var indexProfile = GetString(options, "profile") ?? GetString(options, "index-profile");
@@ -198,13 +203,30 @@ static async Task<int> RunAsync(
             return 0;
         }
 
+        case "eval":
+        {
+            var result = await searchEvaluationService.RunAsync(new SearchEvaluationRequest(
+                Required(options, "queries"),
+                GetInt(options, "limit"),
+                GetNullableBool(options, "hybrid"),
+                GetString(options, "file-path"),
+                GetString(options, "scope"),
+                GetString(options, "workspace-root") ?? GetString(options, "workspace"),
+                GetString(options, "workspace-group") ?? GetString(options, "group"),
+                GetString(options, "content-type"),
+                GetString(options, "retrieval-mode"),
+                GetString(options, "search-profile") ?? GetString(options, "profile")));
+            Console.WriteLine(JsonSerializer.Serialize(result, jsonOptions));
+            return result.Metrics.PassedQueries == result.Metrics.TotalQueries ? 0 : 2;
+        }
+
         case "list":
         {
             var target = RequiredListTarget(args);
             switch (target)
             {
                 case "groups":
-                    WriteGroupsTable(ListWorkspaceGroups(ragNetOptions));
+                    WriteGroupsTable(await workspaceGroupRegistry.GetGroupsAsync());
                     return 0;
 
                 case "workspaces":
@@ -223,7 +245,9 @@ static async Task<int> RunAsync(
             {
                 case "group":
                 case "groups":
-                    Console.WriteLine(JsonSerializer.Serialize(DeleteLocalWorkspaceGroup(GetDeleteSubject(args, options, "group"), ragNetOptions), jsonOptions));
+                    Console.WriteLine(JsonSerializer.Serialize(await DeleteWorkspaceGroupAsync(
+                        GetDeleteSubject(args, options, "group"),
+                        workspaceGroupRegistry), jsonOptions));
                     return 0;
 
                 case "workspace":
@@ -249,11 +273,12 @@ static async Task<int> RunAsync(
                 case "groups":
                     var groupName = GetCommandSubject(args, options, "group");
                     var targets = await ResolveGroupWorkspaceTargetsAsync(options, workspaceRegistry);
-                    Console.WriteLine(JsonSerializer.Serialize(await SaveLocalWorkspaceGroupAsync(
+                    Console.WriteLine(JsonSerializer.Serialize(await SaveWorkspaceGroupAsync(
                         groupName,
                         targets,
                         GetBool(options, "add"),
-                        workspaceRegistry), jsonOptions));
+                        workspaceRegistry,
+                        workspaceGroupRegistry), jsonOptions));
                     return 0;
 
                 default:
@@ -385,6 +410,16 @@ static string? GetString(Dictionary<string, List<string>> options, string name)
         ? values[^1]
         : null;
 
+static int? GetInt(Dictionary<string, List<string>> options, string name)
+    => options.TryGetValue(name, out var values) && values.Count > 0 && !string.IsNullOrWhiteSpace(values[^1])
+        ? int.Parse(values[^1])
+        : null;
+
+static bool? GetNullableBool(Dictionary<string, List<string>> options, string name)
+    => options.TryGetValue(name, out var values)
+        ? values.Count == 0 || bool.Parse(values[^1])
+        : null;
+
 static bool GetBool(Dictionary<string, List<string>> options, string name)
     => options.ContainsKey(name) &&
         (options[name].Count == 0 || bool.Parse(options[name][^1]));
@@ -494,70 +529,26 @@ static async Task<IReadOnlyList<IndexWorkspaceResult>> IndexGroupAsync(
     string group,
     Dictionary<string, List<string>> options,
     IProgress<IndexingProgress>? progress)
-{
-    var localGroup = LoadLocalWorkspaceGroups()
-        .FirstOrDefault(candidate => string.Equals(candidate.Name, group, StringComparison.OrdinalIgnoreCase));
-    if (localGroup is not null)
-    {
-        return await indexer.IndexTargetsAsync(
-            localGroup.Roots,
-            GetMany(options, "exclude"),
-            GetBool(options, "force"),
-            GetString(options, "profile") ?? GetString(options, "index-profile"),
-            progress: progress);
-    }
-
-    return await indexer.IndexGroupAsync(
+    => await indexer.IndexGroupAsync(
         group,
         GetMany(options, "exclude"),
         GetBool(options, "force"),
         GetString(options, "profile") ?? GetString(options, "index-profile"),
         progress: progress);
-}
 
 static async Task<IReadOnlyList<DryRunIndexWorkspaceResult>> DryRunIndexGroupAsync(
     IWorkspaceIndexer indexer,
     string group,
     Dictionary<string, List<string>> options,
     IProgress<IndexingProgress>? progress)
-{
-    var localGroup = LoadLocalWorkspaceGroups()
-        .FirstOrDefault(candidate => string.Equals(candidate.Name, group, StringComparison.OrdinalIgnoreCase));
-    if (localGroup is not null)
-    {
-        return await indexer.DryRunIndexTargetsAsync(
-            localGroup.Roots,
-            GetMany(options, "exclude"),
-            GetBool(options, "force"),
-            GetString(options, "profile") ?? GetString(options, "index-profile"),
-            progress: progress);
-    }
-
-    return await indexer.DryRunIndexGroupAsync(
+    => await indexer.DryRunIndexGroupAsync(
         group,
         GetMany(options, "exclude"),
         GetBool(options, "force"),
         GetString(options, "profile") ?? GetString(options, "index-profile"),
         progress: progress);
-}
 
-static IReadOnlyList<WorkspaceGroupListItem> ListWorkspaceGroups(RagNetOptions options)
-{
-    var configuredGroups = options.WorkspaceGroups
-        .Where(group => !string.IsNullOrWhiteSpace(group.Name))
-        .Select(group => new WorkspaceGroupListItem(group.Name, "configured", group.Roots, group.ExcludeDirectories));
-
-    var localGroups = LoadLocalWorkspaceGroups()
-        .Select(group => new WorkspaceGroupListItem(group.Name, "local", group.Roots, []));
-
-    return configuredGroups
-        .Concat(localGroups)
-        .OrderBy(group => group.Name, StringComparer.OrdinalIgnoreCase)
-        .ThenBy(group => group.Source, StringComparer.OrdinalIgnoreCase)
-        .ToArray();
-}
-
-static void WriteGroupsTable(IReadOnlyList<WorkspaceGroupListItem> groups)
+static void WriteGroupsTable(IReadOnlyList<WorkspaceGroupRecord> groups)
 {
     var rows = groups
         .Select(group => new[]
@@ -566,11 +557,12 @@ static void WriteGroupsTable(IReadOnlyList<WorkspaceGroupListItem> groups)
             group.Source,
             group.Roots.Count.ToString(),
             string.Join(", ", group.Roots),
+            group.IsReadOnly ? "yes" : "no",
             group.ExcludeDirectories.Count == 0 ? "-" : string.Join(", ", group.ExcludeDirectories)
         })
         .ToArray();
 
-    WriteTable(["Name", "Source", "Roots", "Targets", "Excludes"], rows);
+    WriteTable(["Name", "Source", "Roots", "Targets", "Read Only", "Excludes"], rows);
 }
 
 static void WriteWorkspacesTable(IReadOnlyList<IndexedWorkspaceRecord> workspaces)
@@ -618,7 +610,32 @@ static string FormatTableRow(IReadOnlyList<string> columns, IReadOnlyList<int> w
 static int DisplayLength(string? value)
     => value?.Length ?? 0;
 
-static DeleteWorkspaceGroupResult DeleteLocalWorkspaceGroup(string group, RagNetOptions options)
+static async Task<DeleteWorkspaceGroupResult> DeleteWorkspaceGroupAsync(
+    string group,
+    IWorkspaceGroupRegistry workspaceGroupRegistry)
+{
+    var record = await workspaceGroupRegistry.GetGroupAsync(group);
+    if (record is null)
+    {
+        throw new InvalidOperationException($"Workspace group '{group}' was not found.");
+    }
+
+    if (record.Source == WorkspaceGroupSources.Configured || record.IsReadOnly)
+    {
+        throw new InvalidOperationException($"Workspace group '{record.Name}' is configured in appsettings and cannot be deleted by the indexer. Edit configuration to remove it.");
+    }
+
+    if (record.Source == WorkspaceGroupSources.Local)
+    {
+        return DeleteLocalWorkspaceGroup(record.Name);
+    }
+
+    await workspaceGroupRegistry.DeleteGroupAsync(record.Name);
+    Console.Error.WriteLine($"Deleted shared workspace group '{record.Name}'.");
+    return new DeleteWorkspaceGroupResult(record.Name, record.Source, "qdrant");
+}
+
+static DeleteWorkspaceGroupResult DeleteLocalWorkspaceGroup(string group)
 {
     var path = GetLocalWorkspaceGroupsPath();
     var currentGroups = LoadLocalWorkspaceGroups();
@@ -628,13 +645,6 @@ static DeleteWorkspaceGroupResult DeleteLocalWorkspaceGroup(string group, RagNet
 
     if (remainingGroups.Length == currentGroups.Count)
     {
-        var configuredGroupExists = options.WorkspaceGroups.Any(candidate =>
-            string.Equals(candidate.Name, group, StringComparison.OrdinalIgnoreCase));
-        if (configuredGroupExists)
-        {
-            throw new InvalidOperationException($"Workspace group '{group}' is configured in appsettings and cannot be deleted by the indexer. Edit configuration to remove it.");
-        }
-
         throw new InvalidOperationException($"Local workspace group '{group}' was not found.");
     }
 
@@ -680,11 +690,12 @@ static IReadOnlyList<LocalWorkspaceGroup> LoadLocalWorkspaceGroups()
         .ToArray();
 }
 
-static async Task<CreateWorkspaceGroupResult> SaveLocalWorkspaceGroupAsync(
+static async Task<CreateWorkspaceGroupResult> SaveWorkspaceGroupAsync(
     string group,
     IReadOnlyList<string> workspaces,
     bool add,
-    IIndexedWorkspaceRegistry workspaceRegistry)
+    IIndexedWorkspaceRegistry workspaceRegistry,
+    IWorkspaceGroupRegistry workspaceGroupRegistry)
 {
     var roots = new List<string>();
     foreach (var workspace in workspaces.Where(workspace => !string.IsNullOrWhiteSpace(workspace)))
@@ -700,9 +711,12 @@ static async Task<CreateWorkspaceGroupResult> SaveLocalWorkspaceGroupAsync(
         throw new ArgumentException("--workspace must include at least one non-empty path when assigning a group.");
     }
 
-    var path = GetLocalWorkspaceGroupsPath();
-    var currentGroups = LoadLocalWorkspaceGroups();
-    var existingGroup = currentGroups.FirstOrDefault(candidate => string.Equals(candidate.Name, group, StringComparison.OrdinalIgnoreCase));
+    var existingGroup = await workspaceGroupRegistry.GetGroupAsync(group);
+    if (existingGroup is { IsReadOnly: true } || existingGroup?.Source == WorkspaceGroupSources.Configured)
+    {
+        throw new InvalidOperationException($"Workspace group '{existingGroup.Name}' is configured in appsettings and cannot be changed by the indexer. Edit configuration to change it.");
+    }
+
     if (add && existingGroup is not null)
     {
         normalizedRoots = existingGroup.Roots
@@ -711,17 +725,10 @@ static async Task<CreateWorkspaceGroupResult> SaveLocalWorkspaceGroupAsync(
             .ToArray();
     }
 
-    var existing = currentGroups
-        .Where(candidate => !string.Equals(candidate.Name, group, StringComparison.OrdinalIgnoreCase))
-        .Append(new LocalWorkspaceGroup(group, normalizedRoots))
-        .OrderBy(candidate => candidate.Name, StringComparer.OrdinalIgnoreCase)
-        .ToArray();
-
-    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-    File.WriteAllText(path, JsonSerializer.Serialize(new LocalWorkspaceGroupStore(existing), JsonOptions()));
+    var savedGroup = await workspaceGroupRegistry.SaveGroupAsync(group, normalizedRoots);
     var action = add && existingGroup is not null ? "Updated" : "Saved";
-    Console.Error.WriteLine($"{action} workspace group '{group}' with {normalizedRoots.Length} workspace(s) to {path}.");
-    return new CreateWorkspaceGroupResult(group, "local", path, normalizedRoots, add && existingGroup is not null);
+    Console.Error.WriteLine($"{action} shared workspace group '{savedGroup.Name}' with {savedGroup.Roots.Count} workspace(s).");
+    return new CreateWorkspaceGroupResult(savedGroup.Name, savedGroup.Source, "qdrant", savedGroup.Roots, add && existingGroup is not null);
 }
 
 static string GetLocalWorkspaceGroupsPath()
@@ -776,6 +783,7 @@ static void WriteHelp()
       index       --workspace|-w <target> [--workspace|-w <target> ...] [--current|-c] [--group|-g <name>] [--add|-a] [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
       index       --group|-g <name> [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
       status      --workspace <path>
+      eval        --queries <eval.json> [--workspace-root <path>|--group <name>] [--limit <n>] [--hybrid] [--search-profile <profile>]
       create      group <name> --workspace|-w <indexed-name-or-root> [--workspace|-w <indexed-name-or-root> ...] [--current|-c] [--add|-a]
       list        groups
       list        workspaces
@@ -784,12 +792,13 @@ static void WriteHelp()
 
     Options:
       --profile       Index profile: all, code, docs, metadata, frontend, or tests. Default is all.
-      --group, -g     With --workspace, saves/replaces a local group. Without --workspace, indexes an existing local or configured group.
+      --group, -g     With --workspace, saves/replaces a shared group. Without --workspace, indexes an existing group.
       --workspace, -w Index target: workspace root, directory, solution file, or supported file. Repeat to union targets.
       --current, -c   Add the current directory as an index target.
-      --add, -a       With --workspace and --group, append targets to the existing local group instead of replacing it.
+      --add, -a       With --workspace and --group, append targets to the existing group instead of replacing it.
       --dry-run       Preview files and chunks that would be indexed without writing vectors, state, registry, or local groups.
       --no-progress   Suppress progress output. Index/status/delete results are written to stdout.
+      --queries       Search evaluation JSON file. Eval exits 0 when all queries pass and 2 when any query misses.
 
     Examples:
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln
@@ -802,6 +811,7 @@ static void WriteHelp()
       ragnet-indexer create group my-product --current
       ragnet-indexer index --group my-product --force
       ragnet-indexer status --workspace D:\Work\Product\Api
+      ragnet-indexer eval --queries eval.json --workspace-root D:\Work\Product\Api --limit 10 --hybrid
       ragnet-indexer list groups
       ragnet-indexer list workspaces
       ragnet-indexer delete group my-product

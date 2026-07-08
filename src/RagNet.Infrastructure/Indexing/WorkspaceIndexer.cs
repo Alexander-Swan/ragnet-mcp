@@ -22,9 +22,11 @@ public sealed class WorkspaceIndexer(
     IWorkspaceDetector workspaceDetector,
     IWorkspaceScopeResolver workspaceScopeResolver,
     IIndexedWorkspaceRegistry indexedWorkspaceRegistry,
+    IWorkspaceGroupRegistry workspaceGroupRegistry,
     IEnumerable<ICodeAnalyzer> analyzers,
     IWorkspaceIndexStateStore indexStateStore,
     IEmbeddingProvider embeddingProvider,
+    IEmbeddingModelCatalog embeddingModelCatalog,
     IVectorStore vectorStore,
     ISourceIdentityResolver sourceIdentityResolver,
     IOptions<RagNetOptions> options) : IWorkspaceIndexer
@@ -166,13 +168,20 @@ public sealed class WorkspaceIndexer(
         CancellationToken cancellationToken,
         IProgress<IndexingProgress>? progress)
     {
+        var modelResolution = await embeddingModelCatalog.ResolveEmbeddingModelAsync(cancellationToken);
         var analysis = await AnalyzeTargetPlanAsync(
             targetPlan,
             force,
             indexProfile,
+            modelResolution.SelectedModel,
             allowIncompatibleScopedState: false,
             cancellationToken,
             progress);
+        if (!string.IsNullOrWhiteSpace(modelResolution.Message))
+        {
+            analysis.Warnings.Add(modelResolution.Message);
+        }
+
         var workspaceRoot = targetPlan.WorkspaceRoot;
 
         if (analysis.FullReindex && !analysis.MergeScopedState)
@@ -202,19 +211,29 @@ public sealed class WorkspaceIndexer(
         }
 
         Report(progress, workspaceRoot, IndexingProgressStage.SavingState, 0, null, "Saving index state.");
+        var embeddedChunkCountsByFile = CountChunksByFile(embeddedChunks);
+        var currentFilesWithChunkCounts = ApplyChunkCounts(
+            analysis.CurrentFiles,
+            embeddedChunkCountsByFile,
+            analysis.PreviousState.Files);
         var filesToSave = analysis.MergeScopedState
             ? analysis.PreviousState.Files
                 .Where(file => !FileMatchesProfile(file.Key, indexProfile) || !analysis.TargetPlan.CanDeleteMissingFile(file.Key))
                 .Select(file => file.Value)
-                .Concat(analysis.CurrentFiles.Values)
+                .Concat(currentFilesWithChunkCounts.Values)
                 .ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
-            : analysis.CurrentFiles;
+            : currentFilesWithChunkCounts;
+        var totalChunksIndexed = SumChunkCounts(filesToSave);
+        if (totalChunksIndexed == 0 && embeddedChunks.Count == 0)
+        {
+            totalChunksIndexed = await GetPreviousRegistryChunkCountAsync(workspaceRoot, cancellationToken);
+        }
 
         var indexedAtUtc = DateTimeOffset.UtcNow;
         await indexStateStore.SaveAsync(new WorkspaceIndexState(
             workspaceRoot,
             filesToSave,
-            _options.Ollama.EmbeddingModel,
+            modelResolution.SelectedModel,
             IndexSchemaVersion,
             indexedAtUtc,
             StateExists: true), cancellationToken);
@@ -223,15 +242,21 @@ public sealed class WorkspaceIndexer(
             workspaceRoot,
             QdrantCollectionNaming.GetWorkspaceId(workspaceRoot),
             QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot),
-            GetWorkspaceGroupsForRoot(workspaceRoot),
+            await GetWorkspaceGroupsForRootAsync(workspaceRoot, cancellationToken),
             targetPlan.IndexedTargets,
             indexedAtUtc,
             analysis.FilesScanned,
-            embeddedChunks.Count,
+            totalChunksIndexed,
             analysis.FullReindex), cancellationToken);
 
         Report(progress, workspaceRoot, IndexingProgressStage.Completed, embeddedChunks.Count, analysis.Chunks.Count, "Indexing completed.");
-        return new IndexWorkspaceResult(workspaceRoot, analysis.FilesScanned, embeddedChunks.Count, analysis.FullReindex, analysis.Warnings);
+        return new IndexWorkspaceResult(
+            workspaceRoot,
+            analysis.FilesScanned,
+            embeddedChunks.Count,
+            analysis.FullReindex,
+            analysis.Warnings,
+            totalChunksIndexed);
     }
 
     private async Task<EmbeddedChunkBatch> CreateEmbeddingsAsync(
@@ -394,6 +419,7 @@ public sealed class WorkspaceIndexer(
             targetPlan,
             force,
             indexProfile,
+            _options.Ollama.EmbeddingModel,
             allowIncompatibleScopedState: true,
             cancellationToken,
             progress);
@@ -406,16 +432,33 @@ public sealed class WorkspaceIndexer(
             analysis.Chunks.Count,
             "Index dry run completed.");
 
+        var estimatedChunkCountsByFile = CountChunksByFile(analysis.Chunks);
+        var currentFilesWithEstimates = ApplyChunkCounts(
+            analysis.CurrentFiles,
+            estimatedChunkCountsByFile,
+            analysis.PreviousState.Files);
+        var estimatedFilesAfterIndex = analysis.MergeScopedState
+            ? analysis.PreviousState.Files
+                .Where(file => !FileMatchesProfile(file.Key, indexProfile) || !analysis.TargetPlan.CanDeleteMissingFile(file.Key))
+                .Select(file => file.Value)
+                .Concat(currentFilesWithEstimates.Values)
+                .ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
+            : currentFilesWithEstimates;
+        var chunkEstimateRows = CreateFileChunkEstimates(analysis, estimatedChunkCountsByFile);
+
         return new DryRunIndexWorkspaceResult(
             targetPlan.WorkspaceRoot,
             analysis.FilesScanned,
             analysis.Chunks.Count,
+            chunkEstimateRows.Sum(file => file.EstimatedChunksToDelete),
+            SumChunkCounts(estimatedFilesAfterIndex),
             indexProfile,
             analysis.FullReindex,
             analysis.StateCompatible,
             analysis.ChangedFiles.Count,
             analysis.DeletedFiles.Count,
             analysis.UnchangedFileCount,
+            chunkEstimateRows,
             targetPlan.IndexedTargets,
             analysis.Warnings);
     }
@@ -424,6 +467,7 @@ public sealed class WorkspaceIndexer(
         WorkspaceIndexTargetPlan targetPlan,
         bool force,
         string indexProfile,
+        string embeddingModel,
         bool allowIncompatibleScopedState,
         CancellationToken cancellationToken,
         IProgress<IndexingProgress>? progress)
@@ -458,7 +502,7 @@ public sealed class WorkspaceIndexer(
 
         Report(progress, workspaceRoot, IndexingProgressStage.ComparingState, 0, null, "Comparing with previous index state.");
         var previousState = await indexStateStore.LoadAsync(workspaceRoot, cancellationToken);
-        var stateCompatible = IsStateCompatible(previousState);
+        var stateCompatible = IsStateCompatible(previousState, embeddingModel);
         var profileScoped = indexProfile != IndexProfiles.All;
         var targetScoped = !targetPlan.IsFullWorkspace;
         var mergeScopedState = profileScoped || targetScoped;
@@ -559,22 +603,16 @@ public sealed class WorkspaceIndexer(
         CancellationToken cancellationToken = default,
         IProgress<IndexingProgress>? progress = null)
     {
-        var group = _options.WorkspaceGroups.FirstOrDefault(candidate =>
-            string.Equals(candidate.Name, workspaceGroup, StringComparison.OrdinalIgnoreCase));
+        var group = await workspaceGroupRegistry.GetGroupAsync(workspaceGroup, cancellationToken);
         if (group is null)
         {
-            await workspaceScopeResolver.ResolveAsync(
-                filePath: null,
-                scope: "named_workspace_group",
-                workspaceRoot: null,
-                workspaceGroup: workspaceGroup,
-                cancellationToken);
+            throw new InvalidOperationException($"Workspace group '{workspaceGroup}' was not found.");
         }
 
-        var groupExcludes = GetWorkspaceGroupExcludes(workspaceGroup, excludeDirectories);
+        var groupExcludes = GetWorkspaceGroupExcludes(group, excludeDirectories);
 
         return await IndexTargetsAsync(
-            group?.Roots ?? [],
+            group.Roots,
             groupExcludes,
             force,
             indexProfile,
@@ -590,22 +628,16 @@ public sealed class WorkspaceIndexer(
         CancellationToken cancellationToken = default,
         IProgress<IndexingProgress>? progress = null)
     {
-        var group = _options.WorkspaceGroups.FirstOrDefault(candidate =>
-            string.Equals(candidate.Name, workspaceGroup, StringComparison.OrdinalIgnoreCase));
+        var group = await workspaceGroupRegistry.GetGroupAsync(workspaceGroup, cancellationToken);
         if (group is null)
         {
-            await workspaceScopeResolver.ResolveAsync(
-                filePath: null,
-                scope: "named_workspace_group",
-                workspaceRoot: null,
-                workspaceGroup: workspaceGroup,
-                cancellationToken);
+            throw new InvalidOperationException($"Workspace group '{workspaceGroup}' was not found.");
         }
 
-        var groupExcludes = GetWorkspaceGroupExcludes(workspaceGroup, excludeDirectories);
+        var groupExcludes = GetWorkspaceGroupExcludes(group, excludeDirectories);
 
         return await DryRunIndexTargetsAsync(
-            group?.Roots ?? [],
+            group.Roots,
             groupExcludes,
             force,
             indexProfile,
@@ -729,7 +761,7 @@ public sealed class WorkspaceIndexer(
         var workspaceRoot = NormalizePath(workspace.RootPath);
         var state = await indexStateStore.LoadAsync(workspaceRoot, cancellationToken);
         var warnings = new List<string>();
-        var compatible = IsStateCompatible(state);
+        var compatible = IsStateCompatible(state, _options.Ollama.EmbeddingModel);
 
         if (state.StateExists && !compatible)
         {
@@ -741,9 +773,18 @@ public sealed class WorkspaceIndexer(
             state.StateExists,
             state.SavedAtUtc,
             state.Files.Count,
+            SumChunkCounts(state.Files),
             state.EmbeddingModel,
             state.SchemaVersion,
             state.StateExists && !compatible,
+            state.Files.Values
+                .OrderBy(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
+                .Select(file => new IndexFileChunkEstimate(
+                    file.FilePath,
+                    file.ChunkCount,
+                    EstimatedChunksToEmbed: 0,
+                    EstimatedChunksToDelete: 0))
+                .ToArray(),
             warnings);
     }
 
@@ -997,23 +1038,20 @@ public sealed class WorkspaceIndexer(
         return selected;
     }
 
-    private IReadOnlyList<string> GetWorkspaceGroupExcludes(string workspaceGroup, IReadOnlyList<string>? excludeDirectories)
+    private IReadOnlyList<string> GetWorkspaceGroupExcludes(WorkspaceGroupRecord group, IReadOnlyList<string>? excludeDirectories)
     {
-        var group = _options.WorkspaceGroups.FirstOrDefault(candidate =>
-            string.Equals(candidate.Name, workspaceGroup, StringComparison.OrdinalIgnoreCase));
-
         return _options.Workspace.ExcludeDirectories
-            .Concat(group?.ExcludeDirectories ?? [])
+            .Concat(group.ExcludeDirectories)
             .Concat(excludeDirectories ?? [])
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
 
-    private IReadOnlyList<string> GetWorkspaceGroupsForRoot(string workspaceRoot)
+    private async Task<IReadOnlyList<string>> GetWorkspaceGroupsForRootAsync(string workspaceRoot, CancellationToken cancellationToken)
     {
         var normalizedWorkspaceRoot = NormalizePath(workspaceRoot);
-        return _options.WorkspaceGroups
+        return (await workspaceGroupRegistry.GetGroupsAsync(cancellationToken))
             .Where(group => group.Roots
                 .Where(root => !string.IsNullOrWhiteSpace(root))
                 .Select(NormalizePath)
@@ -1099,6 +1137,66 @@ public sealed class WorkspaceIndexer(
             .Replace("\\?", ".") + "$";
     }
 
+    private async Task<int> GetPreviousRegistryChunkCountAsync(string workspaceRoot, CancellationToken cancellationToken)
+    {
+        var previous = (await indexedWorkspaceRegistry.GetIndexedWorkspacesAsync(cancellationToken))
+            .FirstOrDefault(workspace => string.Equals(workspace.WorkspaceRoot, workspaceRoot, StringComparison.OrdinalIgnoreCase));
+
+        return previous?.ChunksIndexed ?? 0;
+    }
+
+    private static IReadOnlyDictionary<string, int> CountChunksByFile(IReadOnlyList<CodeChunk> chunks)
+        => chunks
+            .GroupBy(chunk => NormalizePath(chunk.FilePath), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+
+    private static IReadOnlyDictionary<string, IndexedFileState> ApplyChunkCounts(
+        IReadOnlyDictionary<string, IndexedFileState> files,
+        IReadOnlyDictionary<string, int> chunkCountsByFile,
+        IReadOnlyDictionary<string, IndexedFileState> previousFiles)
+        => files.Values.ToDictionary(
+            file => file.FilePath,
+            file => file with
+            {
+                ChunkCount = chunkCountsByFile.TryGetValue(file.FilePath, out var chunkCount)
+                    ? chunkCount
+                    : previousFiles.TryGetValue(file.FilePath, out var previous)
+                        ? previous.ChunkCount
+                        : file.ChunkCount
+            },
+            StringComparer.OrdinalIgnoreCase);
+
+    private static IReadOnlyList<IndexFileChunkEstimate> CreateFileChunkEstimates(
+        WorkspaceIndexAnalysis analysis,
+        IReadOnlyDictionary<string, int> estimatedChunkCountsByFile)
+    {
+        var changedSet = analysis.ChangedFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var deletedSet = analysis.DeletedFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var paths = analysis.CurrentFiles.Keys
+            .Concat(analysis.DeletedFiles)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(file => file, StringComparer.OrdinalIgnoreCase);
+
+        return paths.Select(file =>
+        {
+            var currentChunks = analysis.PreviousState.Files.TryGetValue(file, out var previous)
+                ? previous.ChunkCount
+                : 0;
+            var estimatedChunksToEmbed = changedSet.Contains(file) && estimatedChunkCountsByFile.TryGetValue(file, out var chunkCount)
+                ? chunkCount
+                : 0;
+            var estimatedChunksToDelete = (changedSet.Contains(file) || deletedSet.Contains(file)) ? currentChunks : 0;
+
+            return new IndexFileChunkEstimate(file, currentChunks, estimatedChunksToEmbed, estimatedChunksToDelete);
+        }).ToArray();
+    }
+
+    private static int SumChunkCounts(IReadOnlyDictionary<string, IndexedFileState> files)
+        => SumChunkCounts(files.Values);
+
+    private static int SumChunkCounts(IEnumerable<IndexedFileState> files)
+        => files.Sum(file => file.ChunkCount);
+
     private static IndexedFileState ComputeIndexedFileState(string filePath)
     {
         var info = new FileInfo(filePath);
@@ -1111,9 +1209,9 @@ public sealed class WorkspaceIndexer(
             info.LastWriteTimeUtc);
     }
 
-    private bool IsStateCompatible(WorkspaceIndexState state)
+    private static bool IsStateCompatible(WorkspaceIndexState state, string embeddingModel)
         => state.StateExists &&
-            string.Equals(state.EmbeddingModel, _options.Ollama.EmbeddingModel, StringComparison.Ordinal) &&
+            string.Equals(state.EmbeddingModel, embeddingModel, StringComparison.Ordinal) &&
             string.Equals(state.SchemaVersion, IndexSchemaVersion, StringComparison.Ordinal);
 
     private static string? NormalizeContentType(string? contentType)
