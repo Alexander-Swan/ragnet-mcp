@@ -1,14 +1,16 @@
 # RagNet MCP
 
-RagNet MCP is a .NET 10, container-first Model Context Protocol server for local semantic code search. It is inspired by `rag-code-mcp`, but uses ASP.NET Core, the official .NET MCP SDK, Roslyn for C# analysis, Ollama for local embeddings, and Qdrant as the intended vector database.
+RagNet MCP is a .NET 10, container-first Model Context Protocol server for local semantic code search. It is inspired by `rag-code-mcp`, but uses ASP.NET Core, the official .NET MCP SDK, Roslyn for C# analysis, Ollama for local embeddings, and Qdrant as the durable vector database.
 
 ## What It Runs
 
-Docker Compose starts three services:
+The default setup is hybrid:
 
-- `qdrant`: vector database on `http://localhost:6333`
-- `ollama`: local embedding runtime on `http://localhost:11434`
-- `ragnet-mcp`: ASP.NET Core MCP server on `http://localhost:7331`
+- Docker starts `qdrant` on `http://localhost:6333`
+- Docker starts `ollama` on `http://localhost:11434`
+- .NET publishes native `ragnet-mcp` and `ragnet-indexer` executables under `artifacts/publish`
+
+Full Docker mode is still available, but it requires explicit source mounts or another source-sync strategy before the containerized MCP server can read arbitrary host workspaces.
 
 MCP endpoint:
 
@@ -28,7 +30,7 @@ http://localhost:7331/health
 .\scripts\setup.ps1
 ```
 
-The setup script builds and starts Docker services, pulls the default Ollama embedding model, and writes repo-local MCP registration files for Visual Studio and VS Code.
+The setup script starts Qdrant/Ollama, publishes the native web service and indexer executables, pulls the default Ollama embedding model, and writes repo-local MCP registration files for Visual Studio and VS Code.
 
 ## MCP Tools
 
@@ -36,19 +38,24 @@ The initial tool surface is:
 
 - `index_workspace`
 - `index_workspace_group`
+- `trigger_indexing`
 - `get_index_status`
 - `search_code`
 - `hybrid_search`
 - `get_code_context`
 - `get_symbol_details`
 
-The current implementation indexes C# files through Roslyn and keeps a working in-memory vector store behind the Qdrant storage abstraction. Qdrant is part of the required runtime topology and the `QdrantVectorStore` is where durable upsert/search will be completed.
+The current implementation indexes C# files through Roslyn, stores embeddings and chunk payloads in Qdrant, and reconstructs search results from Qdrant payload data. Hybrid search asks Qdrant for semantic candidates and applies a local lexical boost over the stored chunk content before returning results.
+
+Agents can use `trigger_indexing` as the generic indexing entry point. Pass `workspace_path` to index one workspace, or `workspace_group` to index a configured multi-project product. The older `index_workspace` and `index_workspace_group` tools remain available as explicit lower-level variants.
 
 ## Incremental Indexing
 
 After the first `index_workspace` run, RagNet stores content-hash file fingerprints in `.ragnet/state.json` under the indexed workspace. Later indexing runs compare the current file list with that state and only re-analyze/re-embed files that changed. Deleted files are removed from the vector store before the state is saved.
 
 The state file also records the embedding model, index/analyzer schema version, and last saved timestamp. If the configured embedding model or schema version changes, RagNet automatically clears the workspace vectors and performs a full reindex. You can force the same lifecycle manually by passing `force: true` to `index_workspace` or `index_workspace_group`.
+
+Qdrant collections are named deterministically as `{CollectionPrefix}-{workspaceId}`, where `workspaceId` is derived from the normalized workspace root rather than the raw path. The default prefix is `ragnet`. A forced/full reindex deletes the workspace collection and recreates it with the current embedding vector size. To manually reset a workspace index, run `index_workspace` with `force: true`, or delete the matching collection from Qdrant and re-run indexing.
 
 Use `get_index_status` with a file or directory inside a workspace to inspect whether state exists, the last indexed timestamp, indexed file count, embedding model, schema version, and whether the stored state requires a full reindex.
 
@@ -59,7 +66,36 @@ The solution is split into logical assemblies:
 - `RagNet.Core`: options, contracts, workspace/indexing models, and storage/analyzer abstractions.
 - `RagNet.Analysis`: language analyzers, starting with the Roslyn C# analyzer.
 - `RagNet.Infrastructure`: workspace detection, indexing orchestration, Ollama embeddings, and vector-store implementations.
+- `RagNet.Composition`: shared dependency-injection wiring for the web host and indexer executable.
 - `RagNet.Mcp`: ASP.NET Core host, MCP transport, endpoints, and tool declarations.
+- `RagNet.Indexer`: native CLI executable for local/CI indexing using the same pipeline as the MCP tools.
+
+## Indexer Executable
+
+Agents can trigger indexing through the `trigger_indexing` MCP tool. Humans, scripts, CI jobs, and future webhook workers can run the same pipeline through `ragnet-indexer`:
+
+```powershell
+dotnet run --project .\src\RagNet.Indexer -- index --workspace D:\Work\Product\Api
+dotnet run --project .\src\RagNet.Indexer -- index --workspace D:\Work\Product\Api --force
+dotnet run --project .\src\RagNet.Indexer -- index-group --group my-product
+dotnet run --project .\src\RagNet.Indexer -- status --workspace D:\Work\Product\Api
+```
+
+The CLI prints progress for each indexing phase to stderr and leaves the final JSON result on stdout for scripts. Pass `--no-progress` to suppress progress output.
+
+The indexer is intended to run where source files are accessible: directly on a developer machine for local projects, or in CI/webhook workers after checking out a repository. The web MCP/search service remains HTTP-based and queries Qdrant.
+
+## Planned Architecture TODO
+
+RagNet should support both local-only and hosted/team usage without forcing the same indexing mechanics into both modes:
+
+- Keep the search/MCP portion web-based so multiple teammates and IDEs can query the same indexed product concurrently.
+- Split indexing into a reusable indexing pipeline plus a separate `RagNet.Indexer` executable/worker. Local mode should run this executable on the host so it can read local project files directly without mounting source folders into a container.
+- Cloud/team mode should run the same indexing pipeline in CI, a worker, or a webhook-triggered job that checks out the repository, performs incremental indexing, and writes vectors into shared Qdrant.
+- Prefer Git metadata when available: repository root, remote URL, branch, commit SHA, changed files, and deleted files. The system should still work without Git, but with reduced functionality based on filesystem scanning and content fingerprints.
+- Add GitHub/GitLab/Azure DevOps-style change notifications later. Push/webhook events should enqueue incremental reindexing for affected repositories/workspaces instead of requiring a full scan every time.
+- Store enough source metadata in vector payloads for hosted search: repository URL, commit SHA, relative path, symbol details, line numbers, and chunk content. A cloud-hosted search service cannot read `D:\...` local files, so context must come from indexed payloads or a repo checkout/object store.
+- Keep Docker-only mode optional. If `ragnet-mcp` itself runs in Docker, workspace folders must be mounted or synced explicitly; the preferred local mode is native indexer plus web search service connected to Dockerized Qdrant/Ollama.
 
 ## Language Support
 
@@ -166,16 +202,19 @@ This is written to `.vscode/mcp.json`.
 
 ## Native Publish
 
-Docker is the default setup mode, but a native self-contained executable can be published:
+Hybrid native/container setup is the default. You can still choose full Docker mode or native-only publishing:
 
 ```powershell
+.\scripts\setup.ps1 -Mode Hybrid
+.\scripts\setup.ps1 -Mode Docker
 .\scripts\setup.ps1 -Mode Native
 ```
 
-The Windows executable is published to:
+The Windows executables are published to:
 
 ```text
-artifacts/publish/win-x64
+artifacts/publish/win-x64/ragnet-mcp
+artifacts/publish/win-x64/ragnet-indexer
 ```
 
 ## Development

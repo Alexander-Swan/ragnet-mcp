@@ -30,6 +30,27 @@ public sealed class RagNetTools(IWorkspaceIndexer indexer)
         CancellationToken cancellationToken = default)
         => indexer.GetStatusAsync(workspace_path, cancellationToken);
 
+    [McpServerTool(Name = "trigger_indexing"), Description("Agent-friendly indexing trigger for either a workspace path or a configured workspace group.")]
+    public async Task<IReadOnlyList<IndexWorkspaceResult>> TriggerIndexing(
+        [Description("A file or directory inside the workspace to index. Required when workspace_group is not provided.")] string? workspace_path = null,
+        [Description("Configured workspace group name from RagNet:WorkspaceGroups. When provided, indexes the whole group.")] string? workspace_group = null,
+        [Description("Additional directory names or workspace-relative directory paths to exclude for this indexing run.")] string[]? exclude_directories = null,
+        [Description("When true, clears existing vectors/state and reindexes all files.")] bool force = false,
+        CancellationToken cancellationToken = default)
+    {
+        if (!string.IsNullOrWhiteSpace(workspace_group))
+        {
+            return await indexer.IndexGroupAsync(workspace_group, exclude_directories, force, cancellationToken);
+        }
+
+        if (string.IsNullOrWhiteSpace(workspace_path))
+        {
+            throw new ArgumentException("Either workspace_path or workspace_group is required.");
+        }
+
+        return [await indexer.IndexAsync(workspace_path, exclude_directories, force, cancellationToken)];
+    }
+
     [McpServerTool(Name = "search_code"), Description("Semantic search over the indexed code for the workspace containing file_path.")]
     public Task<IReadOnlyList<SearchResult>> SearchCode(
         [Description("A file path inside the target workspace. Required for default current_workspace scope.")] string? file_path,

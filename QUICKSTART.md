@@ -10,12 +10,22 @@ This starts:
 
 - Qdrant
 - Ollama
-- RagNet MCP
+
+It also publishes native executables for:
+
+- RagNet MCP web/search service
+- RagNet Indexer CLI
 
 It also registers:
 
 - `.mcp.json` for Visual Studio
 - `.vscode/mcp.json` for VS Code
+
+Use full Docker mode only when you have an explicit source mounting/sync strategy:
+
+```powershell
+.\scripts\setup.ps1 -Mode Docker
+```
 
 ## 2. Check Health
 
@@ -43,20 +53,37 @@ Restart Visual Studio or VS Code if the MCP server is not discovered immediately
 Call the MCP tool:
 
 ```text
-index_workspace
+trigger_indexing
 ```
 
-Pass a file or folder inside the workspace you want indexed.
+Pass `workspace_path` with a file or folder inside the workspace you want indexed. For configured multi-project products, pass `workspace_group` instead. The explicit `index_workspace` and `index_workspace_group` tools are also available.
 
 After the first run, indexing is incremental. RagNet stores content-hash file fingerprints plus embedding/index metadata in `.ragnet/state.json` and only reindexes files that changed or removes files that disappeared.
 
-Pass `force = true` to `index_workspace` when you want to clear existing vectors/state and reindex every file.
+Embeddings and chunk payloads are persisted in Qdrant collections named `{CollectionPrefix}-{workspaceId}`. The default collection prefix is `ragnet`, and the workspace ID is derived from the normalized workspace root.
+
+Pass `force = true` to `index_workspace` when you want to clear the workspace's Qdrant collection/state and reindex every file. You can also reset manually by deleting the workspace collection in Qdrant, then running `index_workspace` again.
 
 To inspect saved state, call:
 
 ```text
 get_index_status
 ```
+
+You can also run the same indexing pipeline without MCP:
+
+```powershell
+dotnet run --project .\src\RagNet.Indexer -- index --workspace D:\Work\Product\Api
+dotnet run --project .\src\RagNet.Indexer -- status --workspace D:\Work\Product\Api
+```
+
+The indexer writes progress to stderr while keeping the final JSON result on stdout. Use `--no-progress` for quiet automation:
+
+```powershell
+dotnet run --project .\src\RagNet.Indexer -- index --workspace D:\Work\Product\Api --no-progress
+```
+
+This is the preferred shape for local automation or future CI/webhook indexing because the indexer runs where the source files are available.
 
 ## 5. Search Code
 
@@ -105,10 +132,10 @@ Generated C# files are skipped by default with `RagNet:Workspace:ExcludeFilePatt
 Index the group with:
 
 ```text
-index_workspace_group
+trigger_indexing
 ```
 
-Pass `force = true` to reindex every workspace in the group.
+Pass `workspace_group = my-product`. Pass `force = true` to reindex every workspace in the group.
 
 Then search with:
 
@@ -125,3 +152,12 @@ C# is supported first. Planned .NET analyzers are:
 
 - F#: `*.fs`, `*.fsproj`
 - VB.NET: `*.vb`, `*.vbproj`
+
+## Planned Hosting Modes
+
+RagNet is expected to support two indexing modes later:
+
+- Local mode: run a native `RagNet.Indexer` executable on the host so it can read local project directories without Docker mounts, while the web MCP/search service queries Qdrant.
+- Hosted/team mode: run the same indexing pipeline from CI or a webhook-triggered worker after GitHub/GitLab/Azure DevOps changes, then let teammates query the shared web search service.
+
+Git metadata should be used when available for repo roots, commit SHAs, and changed-file indexing, but filesystem-based indexing should still work without Git with reduced functionality.

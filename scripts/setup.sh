@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODE="${1:-Docker}"
+MODE="${1:-Hybrid}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-mxbai-embed-large}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -14,6 +14,22 @@ cd "$REPO_ROOT"
 if [[ "$MODE" == "Docker" ]]; then
   docker compose up -d --build
   docker exec ollama ollama pull "$EMBEDDING_MODEL"
+elif [[ "$MODE" == "Hybrid" ]]; then
+  docker compose up -d qdrant ollama
+  docker exec ollama ollama pull "$EMBEDDING_MODEL"
+  dotnet restore ./RagNet.Mcp.sln
+  dotnet publish ./src/RagNet.Mcp/RagNet.Mcp.csproj \
+    -c Release \
+    -r linux-x64 \
+    --self-contained true \
+    /p:PublishSingleFile=true \
+    -o ./artifacts/publish/linux-x64/ragnet-mcp
+  dotnet publish ./src/RagNet.Indexer/RagNet.Indexer.csproj \
+    -c Release \
+    -r linux-x64 \
+    --self-contained true \
+    /p:PublishSingleFile=true \
+    -o ./artifacts/publish/linux-x64/ragnet-indexer
 else
   dotnet restore ./RagNet.Mcp.sln
   dotnet publish ./src/RagNet.Mcp/RagNet.Mcp.csproj \
@@ -21,7 +37,13 @@ else
     -r linux-x64 \
     --self-contained true \
     /p:PublishSingleFile=true \
-    -o ./artifacts/publish/linux-x64
+    -o ./artifacts/publish/linux-x64/ragnet-mcp
+  dotnet publish ./src/RagNet.Indexer/RagNet.Indexer.csproj \
+    -c Release \
+    -r linux-x64 \
+    --self-contained true \
+    /p:PublishSingleFile=true \
+    -o ./artifacts/publish/linux-x64/ragnet-indexer
 fi
 
 pwsh ./scripts/register-copilot.ps1 2>/dev/null || true
@@ -30,3 +52,6 @@ echo ""
 echo "RagNet MCP setup complete."
 echo "MCP endpoint: http://localhost:7331/ragnet-mcp"
 echo "Health:       http://localhost:7331/health"
+if [[ "$MODE" != "Docker" ]]; then
+  echo "Indexer:      ./artifacts/publish/linux-x64/ragnet-indexer/ragnet-indexer"
+fi

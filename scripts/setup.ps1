@@ -1,6 +1,6 @@
 param(
-    [ValidateSet("Docker", "Native")]
-    [string]$Mode = "Docker",
+    [ValidateSet("Docker", "Hybrid", "Native")]
+    [string]$Mode = "Hybrid",
 
     [string]$EmbeddingModel = "mxbai-embed-large",
 
@@ -35,6 +35,30 @@ try {
             docker exec ollama ollama pull $EmbeddingModel
         }
     }
+    elseif ($Mode -eq "Hybrid") {
+        Require-Command "docker"
+        Require-Command "dotnet"
+
+        docker compose up -d qdrant ollama
+
+        if (-not $SkipModelPull) {
+            docker exec ollama ollama pull $EmbeddingModel
+        }
+
+        dotnet restore .\RagNet.Mcp.sln
+        dotnet publish .\src\RagNet.Mcp\RagNet.Mcp.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            /p:PublishSingleFile=true `
+            -o .\artifacts\publish\win-x64\ragnet-mcp
+        dotnet publish .\src\RagNet.Indexer\RagNet.Indexer.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            /p:PublishSingleFile=true `
+            -o .\artifacts\publish\win-x64\ragnet-indexer
+    }
     else {
         Require-Command "dotnet"
 
@@ -44,7 +68,13 @@ try {
             -r win-x64 `
             --self-contained true `
             /p:PublishSingleFile=true `
-            -o .\artifacts\publish\win-x64
+            -o .\artifacts\publish\win-x64\ragnet-mcp
+        dotnet publish .\src\RagNet.Indexer\RagNet.Indexer.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            /p:PublishSingleFile=true `
+            -o .\artifacts\publish\win-x64\ragnet-indexer
     }
 
     if (-not $SkipRegister) {
@@ -55,6 +85,9 @@ try {
     Write-Host "RagNet MCP setup complete."
     Write-Host "MCP endpoint: http://localhost:7331/ragnet-mcp"
     Write-Host "Health:       http://localhost:7331/health"
+    if ($Mode -ne "Docker") {
+        Write-Host "Indexer:      .\artifacts\publish\win-x64\ragnet-indexer\ragnet-indexer.exe"
+    }
 }
 finally {
     Pop-Location

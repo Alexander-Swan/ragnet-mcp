@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\RagNet.Analysis\RagNet.Analysis.csproj" />
+    <ProjectReference Include="..\RagNet.Composition\RagNet.Composition.csproj" />
     <ProjectReference Include="..\RagNet.Core\RagNet.Core.csproj" />
     <ProjectReference Include="..\RagNet.Infrastructure\RagNet.Infrastructure.csproj" />
   </ItemGroup>

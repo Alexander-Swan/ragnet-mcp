@@ -1,5 +1,7 @@
 namespace RagNet.Mcp.Indexing;
 
+using RagNet.Mcp.Source;
+
 public sealed record CodeChunk(
     string Id,
     string WorkspaceRoot,
@@ -9,4 +11,7 @@ public sealed record CodeChunk(
     string SymbolKind,
     int StartLine,
     int EndLine,
-    string Content);
+    string Content)
+{
+    public SourceIdentity? Source { get; init; }
+}

@@ -6,6 +6,7 @@ using RagNet.Mcp.Analyzers.Interfaces;
 using RagNet.Mcp.Configuration;
 using RagNet.Mcp.Embeddings.Interfaces;
 using RagNet.Mcp.Indexing.Interfaces;
+using RagNet.Mcp.Source.Interfaces;
 using RagNet.Mcp.Storage;
 using RagNet.Mcp.Storage.Interfaces;
 using RagNet.Mcp.Workspace;
@@ -21,6 +22,7 @@ public sealed class WorkspaceIndexer(
     IWorkspaceIndexStateStore indexStateStore,
     IEmbeddingProvider embeddingProvider,
     IVectorStore vectorStore,
+    ISourceIdentityResolver sourceIdentityResolver,
     IOptions<RagNetOptions> options) : IWorkspaceIndexer
 {
     private const string IndexSchemaVersion = "ragnet-index-v2/analyzers-v1";
@@ -33,17 +35,19 @@ public sealed class WorkspaceIndexer(
         string workspacePath,
         IReadOnlyList<string>? excludeDirectories = null,
         bool force = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<IndexingProgress>? progress = null)
     {
         var workspace = await workspaceDetector.DetectAsync(workspacePath, cancellationToken);
         EnsureAllowedWorkspaceRoot(workspace.RootPath);
         var workspaceRoot = NormalizePath(workspace.RootPath);
+        Report(progress, workspaceRoot, IndexingProgressStage.Starting, 0, null, "Preparing workspace index.");
         var indexLock = IndexLocks.GetOrAdd(workspaceRoot, _ => new SemaphoreSlim(1, 1));
         await indexLock.WaitAsync(cancellationToken);
 
         try
         {
-            return await IndexLockedAsync(workspaceRoot, excludeDirectories, force, cancellationToken);
+            return await IndexLockedAsync(workspaceRoot, excludeDirectories, force, cancellationToken, progress);
         }
         finally
         {
@@ -55,11 +59,15 @@ public sealed class WorkspaceIndexer(
         string workspaceRoot,
         IReadOnlyList<string>? excludeDirectories,
         bool force,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<IndexingProgress>? progress)
     {
         var warnings = new List<string>();
         var files = EnumerateFiles(workspaceRoot, excludeDirectories).ToArray();
         var currentFiles = new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase);
+        var scanned = 0;
+
+        Report(progress, workspaceRoot, IndexingProgressStage.ScanningFiles, 0, files.Length, "Scanning files.");
 
         foreach (var file in files)
         {
@@ -74,8 +82,12 @@ public sealed class WorkspaceIndexer(
             {
                 warnings.Add($"{file}: {ex.Message}");
             }
+
+            scanned++;
+            Report(progress, workspaceRoot, IndexingProgressStage.ScanningFiles, scanned, files.Length, "Scanning files.");
         }
 
+        Report(progress, workspaceRoot, IndexingProgressStage.ComparingState, 0, null, "Comparing with previous index state.");
         var previousState = await indexStateStore.LoadAsync(workspaceRoot, cancellationToken);
         var stateCompatible = IsStateCompatible(previousState);
         var fullReindex = force || !stateCompatible;
@@ -103,33 +115,49 @@ public sealed class WorkspaceIndexer(
             .Where(file => !currentFiles.ContainsKey(file))
             .ToArray();
         var chunks = new List<CodeChunk>();
+        var workspaceSourceIdentity = await sourceIdentityResolver.ResolveAsync(workspaceRoot, workspaceRoot, cancellationToken);
 
-        foreach (var file in deletedFiles.Concat(changedFiles))
+        var filesToDelete = deletedFiles.Concat(changedFiles).ToArray();
+        var deleted = 0;
+        Report(progress, workspaceRoot, IndexingProgressStage.DeletingVectors, 0, filesToDelete.Length, "Deleting stale vectors.");
+        foreach (var file in filesToDelete)
         {
             cancellationToken.ThrowIfCancellationRequested();
             await vectorStore.DeleteByFileAsync(workspaceRoot, file, cancellationToken);
+            deleted++;
+            Report(progress, workspaceRoot, IndexingProgressStage.DeletingVectors, deleted, filesToDelete.Length, "Deleting stale vectors.");
         }
 
+        var analyzed = 0;
+        Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, 0, changedFiles.Length, "Analyzing changed files.");
         foreach (var file in changedFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var analyzer = _analyzers.FirstOrDefault(candidate => candidate.CanAnalyze(file));
             if (analyzer is null)
             {
+                analyzed++;
+                Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzed, changedFiles.Length, "Analyzing changed files.");
                 continue;
             }
 
             try
             {
-                chunks.AddRange(await analyzer.AnalyzeAsync(workspaceRoot, file, cancellationToken));
+                chunks.AddRange((await analyzer.AnalyzeAsync(workspaceRoot, file, cancellationToken))
+                    .Select(chunk => chunk with { Source = workspaceSourceIdentity.ForFile(chunk.FilePath) }));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 warnings.Add($"{file}: {ex.Message}");
             }
+
+            analyzed++;
+            Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzed, changedFiles.Length, "Analyzing changed files.");
         }
 
         var embeddings = new List<float[]>(chunks.Count);
+        var embedded = 0;
+        Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, 0, chunks.Count, "Creating embeddings.");
         foreach (var chunk in chunks)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -138,13 +166,18 @@ public sealed class WorkspaceIndexer(
                 : chunk.Content;
 
             embeddings.Add(await embeddingProvider.EmbedAsync(content, cancellationToken));
+            embedded++;
+            Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, embedded, chunks.Count, "Creating embeddings.");
         }
 
         if (chunks.Count > 0)
         {
+            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, 0, chunks.Count, "Writing vectors to store.");
             await vectorStore.UpsertAsync(workspaceRoot, chunks, embeddings, cancellationToken);
+            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, chunks.Count, chunks.Count, "Writing vectors to store.");
         }
 
+        Report(progress, workspaceRoot, IndexingProgressStage.SavingState, 0, null, "Saving index state.");
         await indexStateStore.SaveAsync(new WorkspaceIndexState(
             workspaceRoot,
             currentFiles,
@@ -153,6 +186,7 @@ public sealed class WorkspaceIndexer(
             DateTimeOffset.UtcNow,
             StateExists: true), cancellationToken);
         indexedWorkspaceRegistry.MarkIndexed(workspaceRoot);
+        Report(progress, workspaceRoot, IndexingProgressStage.Completed, chunks.Count, chunks.Count, "Indexing completed.");
         return new IndexWorkspaceResult(workspaceRoot, files.Length, chunks.Count, fullReindex, warnings);
     }
 
@@ -160,7 +194,8 @@ public sealed class WorkspaceIndexer(
         string workspaceGroup,
         IReadOnlyList<string>? excludeDirectories = null,
         bool force = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<IndexingProgress>? progress = null)
     {
         var workspaces = await workspaceScopeResolver.ResolveAsync(
             filePath: null,
@@ -174,7 +209,7 @@ public sealed class WorkspaceIndexer(
         foreach (var workspace in workspaces)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            results.Add(await IndexAsync(workspace.RootPath, groupExcludes, force, cancellationToken));
+            results.Add(await IndexAsync(workspace.RootPath, groupExcludes, force, cancellationToken, progress));
         }
 
         return results;
@@ -454,4 +489,13 @@ public sealed class WorkspaceIndexer(
             SchemaVersion: null,
             SavedAtUtc: null,
             StateExists: false);
+
+    private static void Report(
+        IProgress<IndexingProgress>? progress,
+        string workspaceRoot,
+        IndexingProgressStage stage,
+        int current,
+        int? total,
+        string message)
+        => progress?.Report(new IndexingProgress(workspaceRoot, stage, current, total, message));
 }

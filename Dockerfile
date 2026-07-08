@@ -4,6 +4,7 @@ WORKDIR /src
 COPY src/RagNet.Mcp/RagNet.Mcp.csproj src/RagNet.Mcp/
 COPY src/RagNet.Core/RagNet.Core.csproj src/RagNet.Core/
 COPY src/RagNet.Analysis/RagNet.Analysis.csproj src/RagNet.Analysis/
+COPY src/RagNet.Composition/RagNet.Composition.csproj src/RagNet.Composition/
 COPY src/RagNet.Infrastructure/RagNet.Infrastructure.csproj src/RagNet.Infrastructure/
 RUN dotnet restore src/RagNet.Mcp/RagNet.Mcp.csproj
 

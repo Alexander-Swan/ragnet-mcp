@@ -6,13 +6,15 @@ public interface IWorkspaceIndexer
         string workspacePath,
         IReadOnlyList<string>? excludeDirectories = null,
         bool force = false,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        IProgress<IndexingProgress>? progress = null);
 
     Task<IReadOnlyList<IndexWorkspaceResult>> IndexGroupAsync(
         string workspaceGroup,
         IReadOnlyList<string>? excludeDirectories = null,
         bool force = false,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        IProgress<IndexingProgress>? progress = null);
 
     Task<IndexStatusResult> GetStatusAsync(
         string workspacePath,
