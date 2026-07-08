@@ -20,6 +20,8 @@ public sealed class QdrantVectorStore(
 {
     private const string Distance = "Cosine";
     private const int HybridCandidateMultiplier = 5;
+    private const int DeleteFileBatchSize = 64;
+    private const int MaxUpsertBatchSize = 2_048;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly RagNetOptions _options = options.Value;
     private readonly HttpClient _httpClient = httpClient;
@@ -51,25 +53,40 @@ public sealed class QdrantVectorStore(
         var collectionName = QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot);
         await EnsureCollectionAsync(collectionName, vectorSize, cancellationToken);
 
-        var points = chunks.Select((chunk, index) => new
+        foreach (var batchIndexes in Enumerable.Range(0, chunks.Count).Chunk(GetUpsertBatchSize()))
         {
-            id = CreatePointId(workspaceId, chunk.Id),
-            vector = embeddings[index],
-            payload = CreatePayload(workspaceId, workspaceRoot, chunk)
-        }).ToArray();
+            var points = batchIndexes.Select(index => new
+            {
+                id = CreatePointId(workspaceId, chunks[index].Id),
+                vector = embeddings[index],
+                payload = CreatePayload(workspaceId, workspaceRoot, chunks[index])
+            }).ToArray();
 
-        var response = await _httpClient.PutAsJsonAsync(
-            $"collections/{Uri.EscapeDataString(collectionName)}/points?wait=true",
-            new { points },
-            JsonOptions,
-            cancellationToken);
+            var response = await _httpClient.PutAsJsonAsync(
+                $"collections/{Uri.EscapeDataString(collectionName)}/points?wait=true",
+                new { points },
+                JsonOptions,
+                cancellationToken);
 
-        await EnsureSuccessAsync(response, $"upsert points into Qdrant collection '{collectionName}'", cancellationToken);
+            await EnsureSuccessAsync(response, $"upsert {points.Length} points into Qdrant collection '{collectionName}'", cancellationToken);
+        }
+
         logger.LogInformation("Upserted {Count} chunks into Qdrant collection {CollectionName}.", chunks.Count, collectionName);
     }
 
+    private int GetUpsertBatchSize()
+        => Math.Clamp(_options.Qdrant.UpsertBatchSize, 1, MaxUpsertBatchSize);
+
     public async Task DeleteByFileAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default)
+        => await DeleteByFilesAsync(workspaceRoot, [filePath], cancellationToken);
+
+    public async Task DeleteByFilesAsync(string workspaceRoot, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default)
     {
+        if (filePaths.Count == 0)
+        {
+            return;
+        }
+
         var collectionName = QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot);
         if (!await CollectionExistsAsync(collectionName, cancellationToken))
         {
@@ -77,25 +94,36 @@ public sealed class QdrantVectorStore(
         }
 
         var workspaceId = QdrantCollectionNaming.GetWorkspaceId(workspaceRoot);
-        var normalizedFilePath = NormalizePath(filePath);
-        var response = await _httpClient.PostAsJsonAsync(
-            $"collections/{Uri.EscapeDataString(collectionName)}/points/delete?wait=true",
-            new
-            {
-                filter = new
-                {
-                    must = new object[]
-                    {
-                        MatchKeyword("workspace_id", workspaceId),
-                        MatchKeyword("file_path", normalizedFilePath)
-                    }
-                }
-            },
-            JsonOptions,
-            cancellationToken);
+        var normalizedFilePaths = filePaths
+            .Select(NormalizePath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
-        await EnsureSuccessAsync(response, $"delete file '{normalizedFilePath}' from Qdrant collection '{collectionName}'", cancellationToken);
-        logger.LogInformation("Deleted indexed chunks for {FilePath} from Qdrant collection {CollectionName}.", normalizedFilePath, collectionName);
+        foreach (var batch in normalizedFilePaths.Chunk(DeleteFileBatchSize))
+        {
+            var response = await _httpClient.PostAsJsonAsync(
+                $"collections/{Uri.EscapeDataString(collectionName)}/points/delete?wait=true",
+                new
+                {
+                    filter = new
+                    {
+                        must = new object[]
+                        {
+                            MatchKeyword("workspace_id", workspaceId)
+                        },
+                        should = batch.Select(filePath => MatchKeyword("file_path", filePath)).ToArray()
+                    }
+                },
+                JsonOptions,
+                cancellationToken);
+
+            await EnsureSuccessAsync(response, $"delete {batch.Length} files from Qdrant collection '{collectionName}'", cancellationToken);
+        }
+
+        logger.LogInformation(
+            "Deleted indexed chunks for {FileCount} files from Qdrant collection {CollectionName}.",
+            normalizedFilePaths.Length,
+            collectionName);
     }
 
     public async Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default)

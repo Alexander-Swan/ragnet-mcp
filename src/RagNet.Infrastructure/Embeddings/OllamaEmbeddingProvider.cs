@@ -10,14 +10,22 @@ public sealed class OllamaEmbeddingProvider(HttpClient httpClient, IOptions<RagN
     private readonly RagNetOptions _options = options.Value;
 
     public async Task<float[]> EmbedAsync(string text, CancellationToken cancellationToken = default)
+        => (await EmbedBatchAsync([text], cancellationToken))[0];
+
+    public async Task<IReadOnlyList<float[]>> EmbedBatchAsync(IReadOnlyList<string> texts, CancellationToken cancellationToken = default)
     {
+        if (texts.Count == 0)
+        {
+            return [];
+        }
+
         var request = new
         {
             model = _options.Ollama.EmbeddingModel,
-            prompt = text
+            input = texts
         };
 
-        using var response = await httpClient.PostAsJsonAsync("/api/embeddings", request, cancellationToken);
+        using var response = await httpClient.PostAsJsonAsync("/api/embed", request, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -28,8 +36,14 @@ public sealed class OllamaEmbeddingProvider(HttpClient httpClient, IOptions<RagN
         }
 
         var payload = await response.Content.ReadFromJsonAsync<OllamaEmbeddingResponse>(cancellationToken: cancellationToken);
-        return payload?.Embedding ?? [];
+        var embeddings = payload?.Embeddings ?? [];
+        if (embeddings.Count != texts.Count)
+        {
+            throw new InvalidOperationException($"Ollama returned {embeddings.Count} embedding(s) for {texts.Count} input(s).");
+        }
+
+        return embeddings;
     }
 
-    private sealed record OllamaEmbeddingResponse(float[] Embedding);
+    private sealed record OllamaEmbeddingResponse(IReadOnlyList<float[]> Embeddings);
 }

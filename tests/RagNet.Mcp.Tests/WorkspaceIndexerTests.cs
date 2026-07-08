@@ -45,6 +45,158 @@ public sealed class WorkspaceIndexerTests
     }
 
     [Fact]
+    public async Task DryRunIndexTargetsAsync_AnalyzesChangedFilesButDoesNotMutateStores()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var unchanged = workspace.WriteFile("src/Unchanged.cs", "unchanged");
+        var changed = workspace.WriteFile("src/Changed.cs", "changed");
+        var removed = Path.Combine(workspace.RootPath, "src", "Removed.cs");
+        var stateStore = new FakeStateStore(State(
+            workspace.RootPath,
+            FileState(unchanged),
+            FileState(changed, fingerprint: "old-fingerprint"),
+            new IndexedFileState(Path.GetFullPath(removed), "removed-fingerprint", 10, DateTimeOffset.UtcNow)));
+        var vectorStore = new FakeVectorStore();
+        var analyzer = new FakeAnalyzer();
+        var embeddingProvider = new FakeEmbeddingProvider();
+        var registry = new FakeIndexedWorkspaceRegistry();
+        var indexer = CreateIndexer(workspace.RootPath, stateStore, vectorStore, analyzer, registry, embeddingProvider);
+
+        var result = Assert.Single(await indexer.DryRunIndexTargetsAsync([workspace.RootPath]));
+
+        Assert.Equal(Path.GetFullPath(workspace.RootPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), result.WorkspaceRoot);
+        Assert.Equal(IndexProfiles.All, result.IndexProfile);
+        Assert.Equal(2, result.FilesScanned);
+        Assert.Equal(1, result.ChunksThatWouldBeIndexed);
+        Assert.False(result.FullReindex);
+        Assert.True(result.StateCompatible);
+        Assert.Equal(1, result.ChangedFiles);
+        Assert.Equal(1, result.DeletedFiles);
+        Assert.Equal(1, result.UnchangedFiles);
+        Assert.Equal([Path.GetFullPath(changed)], analyzer.AnalyzedFiles);
+        Assert.Empty(vectorStore.DeletedFiles);
+        Assert.Empty(vectorStore.UpsertedChunks);
+        Assert.False(vectorStore.WorkspaceDeleted);
+        Assert.Null(stateStore.SavedState);
+        Assert.Empty(registry.Records);
+        Assert.Equal(0, embeddingProvider.EmbedCallCount);
+    }
+
+    [Fact]
+    public async Task IndexTargetsAsync_EmbeddingFailuresDoNotShiftChunkEmbeddingAlignment()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var first = workspace.WriteFile("src/First.cs", "first");
+        var skipped = workspace.WriteFile("src/Skipped.cs", "skip");
+        var third = workspace.WriteFile("src/Third.cs", "third");
+        var vectorStore = new FakeVectorStore();
+        var embeddingProvider = new FakeEmbeddingProvider((text, _) =>
+        {
+            if (text == "skip")
+            {
+                throw new HttpRequestException("embedding failed");
+            }
+
+            return Task.FromResult(new[] { text == "first" ? 1f : 3f, 0f });
+        });
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(State(workspace.RootPath)),
+            vectorStore,
+            new FakeAnalyzer(),
+            embeddingProvider: embeddingProvider);
+
+        var result = Assert.Single(await indexer.IndexTargetsAsync([first, skipped, third]));
+
+        Assert.Equal(2, result.ChunksIndexed);
+        Assert.Single(result.Warnings);
+        Assert.Equal([Path.GetFullPath(first), Path.GetFullPath(third)], vectorStore.UpsertedChunks.Select(chunk => chunk.FilePath).ToArray());
+        Assert.Equal([1f, 3f], vectorStore.UpsertedEmbeddings.Select(embedding => embedding[0]).ToArray());
+    }
+
+    [Fact]
+    public async Task IndexAsync_EmbeddingConcurrencyHonorsConfiguredCap()
+    {
+        using var workspace = new TemporaryWorkspace();
+        workspace.WriteFile("src/First.cs", "first");
+        workspace.WriteFile("src/Second.cs", "second");
+        workspace.WriteFile("src/Third.cs", "third");
+        var embeddingProvider = new FakeEmbeddingProvider(async (_, cancellationToken) =>
+        {
+            await Task.Delay(50, cancellationToken);
+            return new[] { 1f, 0f };
+        });
+        var options = new RagNetOptions
+        {
+            Indexing = new IndexingOptions
+            {
+                MaxEmbeddingConcurrency = 2,
+                MaxEmbeddingBatchSize = 1
+            }
+        };
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(State(workspace.RootPath)),
+            new FakeVectorStore(),
+            new FakeAnalyzer(),
+            embeddingProvider: embeddingProvider,
+            options: options);
+
+        await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal(3, embeddingProvider.EmbedCallCount);
+        Assert.Equal(2, embeddingProvider.MaxObservedConcurrency);
+    }
+
+    [Fact]
+    public async Task IndexAsync_ReusesEmbeddingForDuplicateChunkContent()
+    {
+        using var workspace = new TemporaryWorkspace();
+        workspace.WriteFile("src/First.cs", "same content");
+        workspace.WriteFile("src/Second.cs", "same content");
+        var embeddingProvider = new FakeEmbeddingProvider();
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(State(workspace.RootPath)),
+            new FakeVectorStore(),
+            new FakeAnalyzer(),
+            embeddingProvider: embeddingProvider);
+
+        var result = await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal(2, result.ChunksIndexed);
+        Assert.Equal(1, embeddingProvider.EmbedCallCount);
+    }
+
+    [Fact]
+    public async Task IndexAsync_EmbeddingBatchesHonorConfiguredBatchSize()
+    {
+        using var workspace = new TemporaryWorkspace();
+        workspace.WriteFile("src/First.cs", "first");
+        workspace.WriteFile("src/Second.cs", "second");
+        workspace.WriteFile("src/Third.cs", "third");
+        var embeddingProvider = new FakeEmbeddingProvider();
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(State(workspace.RootPath)),
+            new FakeVectorStore(),
+            new FakeAnalyzer(),
+            embeddingProvider: embeddingProvider,
+            options: new RagNetOptions
+            {
+                Indexing = new IndexingOptions
+                {
+                    MaxEmbeddingConcurrency = 1,
+                    MaxEmbeddingBatchSize = 2
+                }
+            });
+
+        await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal([2, 1], embeddingProvider.BatchSizes);
+    }
+
+    [Fact]
     public async Task IndexAsync_ProfileScopedRunPreservesOtherProfileState()
     {
         using var workspace = new TemporaryWorkspace();
@@ -307,17 +459,19 @@ public sealed class WorkspaceIndexerTests
         FakeStateStore stateStore,
         FakeVectorStore vectorStore,
         FakeAnalyzer analyzer,
-        FakeIndexedWorkspaceRegistry? registry = null)
+        FakeIndexedWorkspaceRegistry? registry = null,
+        FakeEmbeddingProvider? embeddingProvider = null,
+        RagNetOptions? options = null)
         => new(
             new FakeWorkspaceDetector(workspaceRoot),
             new FakeWorkspaceScopeResolver(workspaceRoot),
             registry ?? new FakeIndexedWorkspaceRegistry(),
             [analyzer],
             stateStore,
-            new FakeEmbeddingProvider(),
+            embeddingProvider ?? new FakeEmbeddingProvider(),
             vectorStore,
             new FakeSourceIdentityResolver(),
-            Options.Create(new RagNetOptions()));
+            Options.Create(options ?? new RagNetOptions()));
 
     private static WorkspaceIndexState State(
         string workspaceRoot,
@@ -424,10 +578,62 @@ public sealed class WorkspaceIndexerTests
             => Task.CompletedTask;
     }
 
-    private sealed class FakeEmbeddingProvider : IEmbeddingProvider
+    private sealed class FakeEmbeddingProvider(
+        Func<string, CancellationToken, Task<float[]>>? embedAsync = null) : IEmbeddingProvider
     {
-        public Task<float[]> EmbedAsync(string text, CancellationToken cancellationToken = default)
-            => Task.FromResult(new[] { 1f, 0f });
+        private int _activeEmbeds;
+        private int _embedCallCount;
+        private int _maxObservedConcurrency;
+
+        public int EmbedCallCount => Volatile.Read(ref _embedCallCount);
+
+        public int MaxObservedConcurrency => Volatile.Read(ref _maxObservedConcurrency);
+
+        public List<int> BatchSizes { get; } = [];
+
+        public async Task<float[]> EmbedAsync(string text, CancellationToken cancellationToken = default)
+            => (await EmbedBatchAsync([text], cancellationToken))[0];
+
+        public async Task<IReadOnlyList<float[]>> EmbedBatchAsync(IReadOnlyList<string> texts, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _embedCallCount);
+            var active = Interlocked.Increment(ref _activeEmbeds);
+            TrackMaxObservedConcurrency(active);
+            try
+            {
+                lock (BatchSizes)
+                {
+                    BatchSizes.Add(texts.Count);
+                }
+
+                var embeddings = new List<float[]>(texts.Count);
+                foreach (var text in texts)
+                {
+                    embeddings.Add(embedAsync is null
+                        ? [1f, 0f]
+                        : await embedAsync(text, cancellationToken));
+                }
+
+                return embeddings;
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeEmbeds);
+            }
+        }
+
+        private void TrackMaxObservedConcurrency(int active)
+        {
+            while (true)
+            {
+                var current = Volatile.Read(ref _maxObservedConcurrency);
+                if (active <= current ||
+                    Interlocked.CompareExchange(ref _maxObservedConcurrency, active, current) == current)
+                {
+                    return;
+                }
+            }
+        }
     }
 
     private sealed class FakeVectorStore : IVectorStore
@@ -435,6 +641,8 @@ public sealed class WorkspaceIndexerTests
         public List<string> DeletedFiles { get; } = [];
 
         public List<CodeChunk> UpsertedChunks { get; } = [];
+
+        public List<float[]> UpsertedEmbeddings { get; } = [];
 
         public bool WorkspaceDeleted { get; private set; }
 
@@ -451,12 +659,16 @@ public sealed class WorkspaceIndexerTests
         public Task UpsertAsync(string workspaceRoot, IReadOnlyList<CodeChunk> chunks, IReadOnlyList<float[]> embeddings, CancellationToken cancellationToken = default)
         {
             UpsertedChunks.AddRange(chunks);
+            UpsertedEmbeddings.AddRange(embeddings);
             return Task.CompletedTask;
         }
 
         public Task DeleteByFileAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default)
+            => DeleteByFilesAsync(workspaceRoot, [filePath], cancellationToken);
+
+        public Task DeleteByFilesAsync(string workspaceRoot, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default)
         {
-            DeletedFiles.Add(Path.GetFullPath(filePath));
+            DeletedFiles.AddRange(filePaths.Select(Path.GetFullPath));
             return Task.CompletedTask;
         }
 

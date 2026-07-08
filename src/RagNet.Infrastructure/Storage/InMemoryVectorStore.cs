@@ -27,12 +27,21 @@ public sealed class InMemoryVectorStore : IVectorStore
     }
 
     public Task DeleteByFileAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default)
+        => DeleteByFilesAsync(workspaceRoot, [filePath], cancellationToken);
+
+    public Task DeleteByFilesAsync(string workspaceRoot, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default)
     {
+        if (filePaths.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
         lock (_gate)
         {
             if (_entriesByWorkspace.TryGetValue(workspaceRoot, out var entries))
             {
-                entries.RemoveAll(entry => string.Equals(entry.Chunk.FilePath, filePath, StringComparison.OrdinalIgnoreCase));
+                var files = filePaths.Select(NormalizePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                entries.RemoveAll(entry => files.Contains(NormalizePath(entry.Chunk.FilePath)));
             }
         }
 
@@ -114,6 +123,9 @@ public sealed class InMemoryVectorStore : IVectorStore
 
     private static string? NormalizeIndexProfile(string? indexProfile)
         => IndexProfiles.NormalizeFilter(indexProfile);
+
+    private static string NormalizePath(string path)
+        => Path.GetFullPath(path);
 
     private static double KeywordScore(string text, IReadOnlyList<string> tokens)
     {

@@ -68,6 +68,43 @@ public sealed class InMemoryVectorStoreTests
         Assert.EndsWith("ProgramTests.cs", result.FilePath);
     }
 
+    [Fact]
+    public async Task DeleteByFilesAsync_RemovesAllMatchingFiles()
+    {
+        var store = new InMemoryVectorStore();
+        var workspaceRoot = Path.Combine(Path.GetTempPath(), $"ragnet-store-tests-{Guid.NewGuid():N}");
+        var chunks = new[]
+        {
+            CreateChunk(workspaceRoot, "src/Program.cs", "csharp", "Program", IndexedContentTypes.Code),
+            CreateChunk(workspaceRoot, "src/Other.cs", "csharp", "Other", IndexedContentTypes.Code),
+            CreateChunk(workspaceRoot, "docs/readme.md", "markdown", "Overview", IndexedContentTypes.Documentation)
+        };
+        var embeddings = new[]
+        {
+            new[] { 1f, 0f },
+            new[] { 1f, 0f },
+            new[] { 1f, 0f }
+        };
+
+        await store.UpsertAsync(workspaceRoot, chunks, embeddings);
+        await store.DeleteByFilesAsync(
+            workspaceRoot,
+            [
+                Path.Combine(workspaceRoot, "src", "Program.cs"),
+                Path.Combine(workspaceRoot, "docs", "readme.md")
+            ]);
+
+        var results = await store.SearchAsync(
+            workspaceRoot,
+            [1f, 0f],
+            "content",
+            limit: 10,
+            hybrid: false);
+
+        var result = Assert.Single(results);
+        Assert.EndsWith("Other.cs", result.FilePath);
+    }
+
     private static CodeChunk CreateChunk(
         string workspaceRoot,
         string relativePath,

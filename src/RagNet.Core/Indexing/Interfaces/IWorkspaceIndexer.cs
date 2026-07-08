@@ -18,7 +18,23 @@ public interface IWorkspaceIndexer
         CancellationToken cancellationToken = default,
         IProgress<IndexingProgress>? progress = null);
 
+    Task<IReadOnlyList<DryRunIndexWorkspaceResult>> DryRunIndexTargetsAsync(
+        IReadOnlyList<string> workspacePaths,
+        IReadOnlyList<string>? excludeDirectories = null,
+        bool force = false,
+        string? indexProfile = null,
+        CancellationToken cancellationToken = default,
+        IProgress<IndexingProgress>? progress = null);
+
     Task<IReadOnlyList<IndexWorkspaceResult>> IndexGroupAsync(
+        string workspaceGroup,
+        IReadOnlyList<string>? excludeDirectories = null,
+        bool force = false,
+        string? indexProfile = null,
+        CancellationToken cancellationToken = default,
+        IProgress<IndexingProgress>? progress = null);
+
+    Task<IReadOnlyList<DryRunIndexWorkspaceResult>> DryRunIndexGroupAsync(
         string workspaceGroup,
         IReadOnlyList<string>? excludeDirectories = null,
         bool force = false,

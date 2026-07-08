@@ -8,6 +8,8 @@ public interface IVectorStore
 
     Task DeleteByFileAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default);
 
+    Task DeleteByFilesAsync(string workspaceRoot, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default);
+
     Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<SearchResult>> SearchAsync(

@@ -6,7 +6,7 @@ This guide sets up RagNet MCP for local use with a Dockerized MCP/search service
 
 Install these first:
 
-- Docker Desktop
+- Docker Desktop, or Rancher Desktop with a nerdctl-compatible CLI
 - .NET 10 SDK
 - PowerShell 7 or Windows PowerShell
 
@@ -20,20 +20,44 @@ Optional agent CLIs:
 From the repository root:
 
 ```powershell
-.\scripts\setup.ps1 -Mode Hybrid
+.\scripts\setup.ps1
 ```
 
-Hybrid mode does this:
+When setup runs in an interactive terminal with no arguments, it asks for:
+
+- setup mode: Hybrid, Docker, or Native
+- container runtime: Docker Desktop/docker compose, Rancher Desktop/nerdctl-compatible, or Auto
+- Ollama mode/source: Docker, Local, or Auto
+- additional embedding models
+- MCP client registration: all supported clients, repo-local files only, or skip
+
+It then shows a summary, including the fixed default ports, and asks for confirmation before applying changes. Press Enter through the prompts for the recommended Hybrid setup.
+
+Hybrid mode does this by default:
 
 - starts Qdrant at `http://localhost:6333`
-- starts Ollama at `http://localhost:11434`, unless something is already listening there
+- starts Ollama at `http://localhost:11434` in a container
 - starts RagNet MCP at `http://localhost:7331`
 - pulls the primary embedding model, default `mxbai-embed-large`
 - pulls additional compatibility embedding models, default `nomic-embed-text`
 - publishes `ragnet-indexer.exe`
 - registers MCP configs for supported local tools
 
-If you already run Ollama locally, setup reuses that host Ollama from the MCP container through `host.docker.internal:11434` and starts only Qdrant plus RagNet MCP in Docker. This avoids Docker port conflicts on `11434`.
+By default, all services except the indexer run in containers: Qdrant, Ollama, and RagNet MCP. Before starting them, setup checks the required ports. If a port is already open because the matching compose service is already running, setup reuses/updates that service. If the port belongs to something else, setup fails early with a clear conflict message.
+
+If you already run Ollama locally and intentionally want to reuse it, choose `Local` or `Auto`. Local Ollama is reached from the MCP container through `host.docker.internal:11434`.
+
+For non-interactive CI or scripted setup, pass explicit arguments:
+
+```powershell
+.\scripts\setup.ps1 -Mode Hybrid -ContainerRuntime Docker -OllamaMode Docker -SkipRegister -NonInteractive
+```
+
+On Linux/macOS:
+
+```bash
+NON_INTERACTIVE=1 SKIP_REGISTER=1 CONTAINER_RUNTIME=Docker OLLAMA_MODE=Docker ./scripts/setup.sh Hybrid
+```
 
 To explicitly use local Ollama and never start the Docker Ollama image:
 
@@ -59,7 +83,19 @@ On Linux/macOS:
 OLLAMA_MODE=Docker ./scripts/setup.sh Hybrid
 ```
 
-The default is `-OllamaMode Auto`, which uses local Ollama when `localhost:11434` is already occupied and otherwise starts the Docker Ollama service.
+`-OllamaMode Auto` is available when you prefer the older behavior: use local Ollama when `localhost:11434` is already occupied, otherwise start the containerized Ollama service.
+
+To use Rancher Desktop or another nerdctl-compatible runtime:
+
+```powershell
+.\scripts\setup.ps1 -Mode Hybrid -ContainerRuntime Nerdctl
+```
+
+On Linux/macOS:
+
+```bash
+CONTAINER_RUNTIME=Nerdctl ./scripts/setup.sh Hybrid
+```
 
 To override the extra models pulled by setup:
 
@@ -85,6 +121,12 @@ In Hybrid mode, setup starts the MCP server in Docker. Check it with:
 
 ```powershell
 docker compose ps ragnet-mcp
+```
+
+For nerdctl-compatible runtimes:
+
+```powershell
+nerdctl compose ps ragnet-mcp
 ```
 
 Then check:
@@ -118,6 +160,20 @@ Setup registers `ragnet-mcp` where the relevant client is available:
 - Claude Code: user-scope Claude MCP config
 
 All direct registrations use HTTP/streamable HTTP.
+
+In the interactive installer, choose `RepoOnly` to write only `.mcp.json` and `.vscode/mcp.json`, or `Skip` to skip registration. In non-interactive runs, use:
+
+```powershell
+.\scripts\setup.ps1 -RegisterClients RepoOnly
+.\scripts\setup.ps1 -SkipRegister
+```
+
+On Linux/macOS:
+
+```bash
+REGISTER_CLIENTS=RepoOnly ./scripts/setup.sh Hybrid
+SKIP_REGISTER=1 ./scripts/setup.sh Hybrid
+```
 
 To re-run only registration:
 
@@ -163,6 +219,14 @@ Repeat `--workspace` to union multiple targets. Two solution files in the same r
 .\bin\ragnet-indexer.exe index --group my-product
 ```
 
+Preview a run without writing embeddings, vectors, index state, registry records, or local groups:
+
+```powershell
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --dry-run
+```
+
+Dry-run output includes the resolved workspace root, target paths, scanned file count, chunks that would be indexed, index profile, state compatibility, whether a full reindex would be required, and changed/deleted/unchanged file counts.
+
 List local indexer groups and indexed workspaces as tables, or remove them:
 
 ```powershell
@@ -179,6 +243,8 @@ The indexer prints progress to stderr and writes index/status/delete results to 
 ```powershell
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --no-progress
 ```
+
+Embedding requests run as concurrent Ollama batches while indexing. Tune concurrent batch count with `RagNet:Indexing:MaxEmbeddingConcurrency`, embedding batch size with `RagNet:Indexing:MaxEmbeddingBatchSize`, and Qdrant write size with `RagNet:Qdrant:UpsertBatchSize` in `appsettings.json` or an environment-specific override. Defaults are `4`, `16`, and `256`.
 
 Check index state:
 
@@ -210,7 +276,13 @@ Provide a `file_path` inside an indexed workspace and a natural-language query.
 .\scripts\setup.ps1 -Mode Hybrid
 ```
 
-Recommended for local development. Qdrant and RagNet MCP run in Docker. Ollama runs in Docker unless an existing local Ollama is detected. The indexer runs as a local executable so it can read host source folders directly.
+Recommended for local development. Qdrant, Ollama, and RagNet MCP run in containers by default. The indexer runs as a local executable so it can read host source folders directly. Use `-OllamaMode Local` or `-OllamaMode Auto` only when you intentionally want to reuse a host Ollama instance.
+
+Use Rancher Desktop/nerdctl-compatible compose commands instead of Docker Desktop:
+
+```powershell
+.\scripts\setup.ps1 -Mode Hybrid -ContainerRuntime Nerdctl
+```
 
 Use local Ollama instead of the Docker image:
 
@@ -282,13 +354,13 @@ If setup fails with this message:
 ports are not available: exposing port TCP 0.0.0.0:11434
 ```
 
-another Ollama instance is already using `localhost:11434`. In Hybrid mode, rerun setup after this update:
+another Ollama instance is already using `localhost:11434`. The default Hybrid setup expects containerized Ollama, so either stop the conflicting host service or intentionally opt into local Ollama:
 
 ```powershell
 .\scripts\setup.ps1 -Mode Hybrid -OllamaMode Local
 ```
 
-The script will reuse the existing Ollama and start only Qdrant in Docker. If you prefer Docker Ollama instead, stop the host Ollama service first, then rerun setup with `-OllamaMode Docker`.
+The script will reuse the existing Ollama and start Qdrant plus RagNet MCP in containers. If you prefer containerized Ollama, stop the host Ollama service first, then rerun setup with `-OllamaMode Docker`.
 
 If Claude Code shows `Failed to connect` after registration, start `ragnet-mcp.exe`; the registration can exist before the server is running.
 

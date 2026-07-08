@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using RagNet.Mcp.Analyzers;
@@ -29,6 +30,8 @@ public sealed class WorkspaceIndexer(
 {
     private const string IndexSchemaVersion = "ragnet-index-v2/analyzers-v8";
     private const int SearchCandidateMultiplier = 5;
+    private const int MaxEmbeddingConcurrencyLimit = 16;
+    private const int MaxEmbeddingBatchSizeLimit = 128;
     private static readonly Regex SolutionProjectRegex = new(
         "^Project\\(\"\\{[^}]+\\}\"\\)\\s*=\\s*\"[^\"]+\",\\s*\"([^\"]+)\"",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -106,6 +109,55 @@ public sealed class WorkspaceIndexer(
         return results;
     }
 
+    public async Task<IReadOnlyList<DryRunIndexWorkspaceResult>> DryRunIndexTargetsAsync(
+        IReadOnlyList<string> workspacePaths,
+        IReadOnlyList<string>? excludeDirectories = null,
+        bool force = false,
+        string? indexProfile = null,
+        CancellationToken cancellationToken = default,
+        IProgress<IndexingProgress>? progress = null)
+    {
+        if (workspacePaths.Count == 0)
+        {
+            throw new ArgumentException("At least one workspace target is required.", nameof(workspacePaths));
+        }
+
+        var normalizedIndexProfile = IndexProfiles.Normalize(indexProfile);
+        var plans = new Dictionary<string, WorkspaceIndexTargetPlan>(StringComparer.OrdinalIgnoreCase);
+        foreach (var workspacePath in workspacePaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var targetPlan = await CreateTargetPlanAsync(workspacePath, excludeDirectories, cancellationToken);
+            if (plans.TryGetValue(targetPlan.WorkspaceRoot, out var existing))
+            {
+                plans[targetPlan.WorkspaceRoot] = existing.Merge(targetPlan);
+            }
+            else
+            {
+                plans[targetPlan.WorkspaceRoot] = targetPlan;
+            }
+        }
+
+        var results = new List<DryRunIndexWorkspaceResult>();
+        foreach (var plan in plans.Values)
+        {
+            Report(progress, plan.WorkspaceRoot, IndexingProgressStage.Starting, 0, null, "Preparing workspace index dry run.");
+            var indexLock = IndexLocks.GetOrAdd(plan.WorkspaceRoot, _ => new SemaphoreSlim(1, 1));
+            await indexLock.WaitAsync(cancellationToken);
+
+            try
+            {
+                results.Add(await DryRunIndexLockedAsync(plan, force, normalizedIndexProfile, cancellationToken, progress));
+            }
+            finally
+            {
+                indexLock.Release();
+            }
+        }
+
+        return results;
+    }
+
     private async Task<IndexWorkspaceResult> IndexLockedAsync(
         WorkspaceIndexTargetPlan targetPlan,
         bool force,
@@ -113,10 +165,263 @@ public sealed class WorkspaceIndexer(
         CancellationToken cancellationToken,
         IProgress<IndexingProgress>? progress)
     {
+        var analysis = await AnalyzeTargetPlanAsync(
+            targetPlan,
+            force,
+            indexProfile,
+            allowIncompatibleScopedState: false,
+            cancellationToken,
+            progress);
+        var workspaceRoot = targetPlan.WorkspaceRoot;
+
+        if (analysis.FullReindex && !analysis.MergeScopedState)
+        {
+            await vectorStore.DeleteWorkspaceAsync(workspaceRoot, cancellationToken);
+        }
+
+        var filesToDelete = analysis.DeletedFiles.Concat(analysis.ChangedFiles).ToArray();
+        Report(progress, workspaceRoot, IndexingProgressStage.DeletingVectors, 0, filesToDelete.Length, "Deleting stale vectors.");
+        if (filesToDelete.Length > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await vectorStore.DeleteByFilesAsync(workspaceRoot, filesToDelete, cancellationToken);
+        }
+
+        Report(progress, workspaceRoot, IndexingProgressStage.DeletingVectors, filesToDelete.Length, filesToDelete.Length, "Deleting stale vectors.");
+
+        var embeddedBatch = await CreateEmbeddingsAsync(workspaceRoot, analysis.Chunks, analysis.Warnings, cancellationToken, progress);
+        var embeddedChunks = embeddedBatch.Chunks;
+        var embeddings = embeddedBatch.Embeddings;
+
+        if (embeddedChunks.Count > 0)
+        {
+            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, 0, embeddedChunks.Count, "Writing vectors to store.");
+            await vectorStore.UpsertAsync(workspaceRoot, embeddedChunks, embeddings, cancellationToken);
+            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, embeddedChunks.Count, embeddedChunks.Count, "Writing vectors to store.");
+        }
+
+        Report(progress, workspaceRoot, IndexingProgressStage.SavingState, 0, null, "Saving index state.");
+        var filesToSave = analysis.MergeScopedState
+            ? analysis.PreviousState.Files
+                .Where(file => !FileMatchesProfile(file.Key, indexProfile) || !analysis.TargetPlan.CanDeleteMissingFile(file.Key))
+                .Select(file => file.Value)
+                .Concat(analysis.CurrentFiles.Values)
+                .ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
+            : analysis.CurrentFiles;
+
+        var indexedAtUtc = DateTimeOffset.UtcNow;
+        await indexStateStore.SaveAsync(new WorkspaceIndexState(
+            workspaceRoot,
+            filesToSave,
+            _options.Ollama.EmbeddingModel,
+            IndexSchemaVersion,
+            indexedAtUtc,
+            StateExists: true), cancellationToken);
+
+        await indexedWorkspaceRegistry.MarkIndexedAsync(new IndexedWorkspaceRecord(
+            workspaceRoot,
+            QdrantCollectionNaming.GetWorkspaceId(workspaceRoot),
+            QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot),
+            GetWorkspaceGroupsForRoot(workspaceRoot),
+            targetPlan.IndexedTargets,
+            indexedAtUtc,
+            analysis.FilesScanned,
+            embeddedChunks.Count,
+            analysis.FullReindex), cancellationToken);
+
+        Report(progress, workspaceRoot, IndexingProgressStage.Completed, embeddedChunks.Count, analysis.Chunks.Count, "Indexing completed.");
+        return new IndexWorkspaceResult(workspaceRoot, analysis.FilesScanned, embeddedChunks.Count, analysis.FullReindex, analysis.Warnings);
+    }
+
+    private async Task<EmbeddedChunkBatch> CreateEmbeddingsAsync(
+        string workspaceRoot,
+        IReadOnlyList<CodeChunk> chunks,
+        List<string> warnings,
+        CancellationToken cancellationToken,
+        IProgress<IndexingProgress>? progress)
+    {
+        var results = new EmbeddedChunk?[chunks.Count];
+        var workItems = CreateEmbeddingWorkItems(chunks);
+        var completed = 0;
+        var warningLock = new object();
+        Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, 0, chunks.Count, "Creating embeddings.");
+
+        await Parallel.ForEachAsync(
+            workItems.Chunk(GetMaxEmbeddingBatchSize()),
+            new ParallelOptions
+            {
+                CancellationToken = cancellationToken,
+                MaxDegreeOfParallelism = GetMaxEmbeddingConcurrency()
+            },
+            async (batch, token) =>
+            {
+                try
+                {
+                    token.ThrowIfCancellationRequested();
+                    var embeddings = await embeddingProvider.EmbedBatchAsync(batch.Select(item => item.Content).ToArray(), token);
+                    for (var index = 0; index < batch.Length; index++)
+                    {
+                        AssignEmbeddingResult(batch[index], embeddings[index], chunks, results);
+                        var current = Interlocked.Add(ref completed, batch[index].ChunkIndexes.Count);
+                        Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, current, chunks.Count, "Creating embeddings.");
+                    }
+                }
+                catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException)
+                {
+                    await EmbedBatchIndividuallyAsync(batch, chunks, results, warnings, warningLock, () =>
+                    {
+                        var current = Interlocked.Add(ref completed, 1);
+                        Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, current, chunks.Count, "Creating embeddings.");
+                    }, token);
+                }
+            });
+
+        var embeddedChunks = new List<CodeChunk>(chunks.Count);
+        var embeddings = new List<float[]>(chunks.Count);
+        foreach (var result in results)
+        {
+            if (result is null)
+            {
+                continue;
+            }
+
+            embeddedChunks.Add(result.Chunk);
+            embeddings.Add(result.Embedding);
+        }
+
+        return new EmbeddedChunkBatch(embeddedChunks, embeddings);
+    }
+
+    private int GetMaxEmbeddingConcurrency()
+        => Math.Clamp(_options.Indexing.MaxEmbeddingConcurrency, 1, MaxEmbeddingConcurrencyLimit);
+
+    private int GetMaxEmbeddingBatchSize()
+        => Math.Clamp(_options.Indexing.MaxEmbeddingBatchSize, 1, MaxEmbeddingBatchSizeLimit);
+
+    private IReadOnlyList<EmbeddingWorkItem> CreateEmbeddingWorkItems(IReadOnlyList<CodeChunk> chunks)
+    {
+        var workItems = new List<EmbeddingWorkItem>(chunks.Count);
+        var workItemsByContent = new Dictionary<string, EmbeddingWorkItem>(StringComparer.Ordinal);
+        for (var index = 0; index < chunks.Count; index++)
+        {
+            var content = chunks[index].Content.Length > _options.Indexing.ChunkMaxChars
+                ? chunks[index].Content[.._options.Indexing.ChunkMaxChars]
+                : chunks[index].Content;
+            var cacheKey = CreateEmbeddingCacheKey(content);
+            if (workItemsByContent.TryGetValue(cacheKey, out var existing))
+            {
+                existing.ChunkIndexes.Add(index);
+                continue;
+            }
+
+            var workItem = new EmbeddingWorkItem(cacheKey, content, [index]);
+            workItemsByContent[cacheKey] = workItem;
+            workItems.Add(workItem);
+        }
+
+        return workItems;
+    }
+
+    private async Task EmbedBatchIndividuallyAsync(
+        IReadOnlyList<EmbeddingWorkItem> batch,
+        IReadOnlyList<CodeChunk> chunks,
+        EmbeddedChunk?[] results,
+        List<string> warnings,
+        object warningLock,
+        Action reportChunkCompleted,
+        CancellationToken cancellationToken)
+    {
+        foreach (var item in batch)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                AssignEmbeddingResult(item, await embeddingProvider.EmbedAsync(item.Content, cancellationToken), chunks, results);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException)
+            {
+                lock (warningLock)
+                {
+                    foreach (var chunkIndex in item.ChunkIndexes)
+                    {
+                        var chunk = chunks[chunkIndex];
+                        warnings.Add($"Embedding skipped for {chunk.FilePath}:{chunk.StartLine}-{chunk.EndLine} ({chunk.SymbolName}): {ex.Message}");
+                    }
+                }
+            }
+            finally
+            {
+                foreach (var _ in item.ChunkIndexes)
+                {
+                    reportChunkCompleted();
+                }
+            }
+        }
+    }
+
+    private static void AssignEmbeddingResult(
+        EmbeddingWorkItem item,
+        float[] embedding,
+        IReadOnlyList<CodeChunk> chunks,
+        EmbeddedChunk?[] results)
+    {
+        foreach (var chunkIndex in item.ChunkIndexes)
+        {
+            results[chunkIndex] = new EmbeddedChunk(chunks[chunkIndex], embedding);
+        }
+    }
+
+    private static string CreateEmbeddingCacheKey(string content)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content)));
+
+    private async Task<DryRunIndexWorkspaceResult> DryRunIndexLockedAsync(
+        WorkspaceIndexTargetPlan targetPlan,
+        bool force,
+        string indexProfile,
+        CancellationToken cancellationToken,
+        IProgress<IndexingProgress>? progress)
+    {
+        var analysis = await AnalyzeTargetPlanAsync(
+            targetPlan,
+            force,
+            indexProfile,
+            allowIncompatibleScopedState: true,
+            cancellationToken,
+            progress);
+
+        Report(
+            progress,
+            targetPlan.WorkspaceRoot,
+            IndexingProgressStage.Completed,
+            analysis.Chunks.Count,
+            analysis.Chunks.Count,
+            "Index dry run completed.");
+
+        return new DryRunIndexWorkspaceResult(
+            targetPlan.WorkspaceRoot,
+            analysis.FilesScanned,
+            analysis.Chunks.Count,
+            indexProfile,
+            analysis.FullReindex,
+            analysis.StateCompatible,
+            analysis.ChangedFiles.Count,
+            analysis.DeletedFiles.Count,
+            analysis.UnchangedFileCount,
+            targetPlan.IndexedTargets,
+            analysis.Warnings);
+    }
+
+    private async Task<WorkspaceIndexAnalysis> AnalyzeTargetPlanAsync(
+        WorkspaceIndexTargetPlan targetPlan,
+        bool force,
+        string indexProfile,
+        bool allowIncompatibleScopedState,
+        CancellationToken cancellationToken,
+        IProgress<IndexingProgress>? progress)
+    {
         var warnings = new List<string>();
         var workspaceRoot = targetPlan.WorkspaceRoot;
-        var files = targetPlan.EnumerateFiles().ToArray();
-        var profileFiles = files
+        var profileFiles = targetPlan.EnumerateFiles()
             .Where(file => FileMatchesProfile(file, indexProfile))
             .ToArray();
         var currentFiles = new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase);
@@ -162,12 +467,17 @@ public sealed class WorkspaceIndexer(
 
         if (fullReindex && !mergeScopedState)
         {
-            await vectorStore.DeleteWorkspaceAsync(workspaceRoot, cancellationToken);
             previousState = EmptyState(workspaceRoot);
         }
         else if (!stateCompatible)
         {
-            throw new InvalidOperationException("Scoped indexing requires a compatible existing index state. Run a full workspace reindex first.");
+            if (!allowIncompatibleScopedState)
+            {
+                throw new InvalidOperationException("Scoped indexing requires a compatible existing index state. Run a full workspace reindex first.");
+            }
+
+            warnings.Add("Scoped indexing would require a compatible existing index state. Run a full workspace reindex before applying this scoped index.");
+            previousState = EmptyState(workspaceRoot);
         }
 
         var changedFiles = currentFiles.Values
@@ -181,19 +491,10 @@ public sealed class WorkspaceIndexer(
                 targetPlan.CanDeleteMissingFile(file) &&
                 !currentFiles.ContainsKey(file))
             .ToArray();
+        var changedSet = changedFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var unchangedFileCount = currentFiles.Keys.Count(file => !changedSet.Contains(file));
         var chunks = new List<CodeChunk>();
         var workspaceSourceIdentity = await sourceIdentityResolver.ResolveAsync(workspaceRoot, workspaceRoot, cancellationToken);
-
-        var filesToDelete = deletedFiles.Concat(changedFiles).ToArray();
-        var deleted = 0;
-        Report(progress, workspaceRoot, IndexingProgressStage.DeletingVectors, 0, filesToDelete.Length, "Deleting stale vectors.");
-        foreach (var file in filesToDelete)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            await vectorStore.DeleteByFileAsync(workspaceRoot, file, cancellationToken);
-            deleted++;
-            Report(progress, workspaceRoot, IndexingProgressStage.DeletingVectors, deleted, filesToDelete.Length, "Deleting stale vectors.");
-        }
 
         var analyzed = 0;
         Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, 0, changedFiles.Length, "Analyzing changed files.");
@@ -226,69 +527,19 @@ public sealed class WorkspaceIndexer(
             Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzed, changedFiles.Length, "Analyzing changed files.");
         }
 
-        var embeddedChunks = new List<CodeChunk>(chunks.Count);
-        var embeddings = new List<float[]>(chunks.Count);
-        var embedded = 0;
-        Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, 0, chunks.Count, "Creating embeddings.");
-        foreach (var chunk in chunks)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var content = chunk.Content.Length > _options.Indexing.ChunkMaxChars
-                ? chunk.Content[.._options.Indexing.ChunkMaxChars]
-                : chunk.Content;
-
-            try
-            {
-                embeddings.Add(await embeddingProvider.EmbedAsync(content, cancellationToken));
-                embeddedChunks.Add(chunk);
-            }
-            catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException)
-            {
-                warnings.Add($"Embedding skipped for {chunk.FilePath}:{chunk.StartLine}-{chunk.EndLine} ({chunk.SymbolName}): {ex.Message}");
-            }
-
-            embedded++;
-            Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, embedded, chunks.Count, "Creating embeddings.");
-        }
-
-        if (embeddedChunks.Count > 0)
-        {
-            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, 0, embeddedChunks.Count, "Writing vectors to store.");
-            await vectorStore.UpsertAsync(workspaceRoot, embeddedChunks, embeddings, cancellationToken);
-            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, embeddedChunks.Count, embeddedChunks.Count, "Writing vectors to store.");
-        }
-
-        Report(progress, workspaceRoot, IndexingProgressStage.SavingState, 0, null, "Saving index state.");
-        var filesToSave = mergeScopedState
-            ? previousState.Files
-                .Where(file => !FileMatchesProfile(file.Key, indexProfile) || !targetPlan.CanDeleteMissingFile(file.Key))
-                .Select(file => file.Value)
-                .Concat(currentFiles.Values)
-                .ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
-            : currentFiles;
-
-        var indexedAtUtc = DateTimeOffset.UtcNow;
-        await indexStateStore.SaveAsync(new WorkspaceIndexState(
-            workspaceRoot,
-            filesToSave,
-            _options.Ollama.EmbeddingModel,
-            IndexSchemaVersion,
-            indexedAtUtc,
-            StateExists: true), cancellationToken);
-
-        await indexedWorkspaceRegistry.MarkIndexedAsync(new IndexedWorkspaceRecord(
-            workspaceRoot,
-            QdrantCollectionNaming.GetWorkspaceId(workspaceRoot),
-            QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot),
-            GetWorkspaceGroupsForRoot(workspaceRoot),
-            targetPlan.IndexedTargets,
-            indexedAtUtc,
+        return new WorkspaceIndexAnalysis(
+            targetPlan,
+            previousState,
+            currentFiles,
+            changedFiles,
+            deletedFiles,
+            chunks,
+            warnings,
             profileFiles.Length,
-            embeddedChunks.Count,
-            fullReindex), cancellationToken);
-
-        Report(progress, workspaceRoot, IndexingProgressStage.Completed, embeddedChunks.Count, chunks.Count, "Indexing completed.");
-        return new IndexWorkspaceResult(workspaceRoot, profileFiles.Length, embeddedChunks.Count, fullReindex, warnings);
+            fullReindex,
+            stateCompatible,
+            mergeScopedState,
+            unchangedFileCount);
     }
 
     public async Task<IReadOnlyList<IndexWorkspaceResult>> IndexGroupAsync(
@@ -314,6 +565,37 @@ public sealed class WorkspaceIndexer(
         var groupExcludes = GetWorkspaceGroupExcludes(workspaceGroup, excludeDirectories);
 
         return await IndexTargetsAsync(
+            group?.Roots ?? [],
+            groupExcludes,
+            force,
+            indexProfile,
+            cancellationToken,
+            progress);
+    }
+
+    public async Task<IReadOnlyList<DryRunIndexWorkspaceResult>> DryRunIndexGroupAsync(
+        string workspaceGroup,
+        IReadOnlyList<string>? excludeDirectories = null,
+        bool force = false,
+        string? indexProfile = null,
+        CancellationToken cancellationToken = default,
+        IProgress<IndexingProgress>? progress = null)
+    {
+        var group = _options.WorkspaceGroups.FirstOrDefault(candidate =>
+            string.Equals(candidate.Name, workspaceGroup, StringComparison.OrdinalIgnoreCase));
+        if (group is null)
+        {
+            await workspaceScopeResolver.ResolveAsync(
+                filePath: null,
+                scope: "named_workspace_group",
+                workspaceRoot: null,
+                workspaceGroup: workspaceGroup,
+                cancellationToken);
+        }
+
+        var groupExcludes = GetWorkspaceGroupExcludes(workspaceGroup, excludeDirectories);
+
+        return await DryRunIndexTargetsAsync(
             group?.Roots ?? [],
             groupExcludes,
             force,
@@ -1166,4 +1448,24 @@ public sealed class WorkspaceIndexer(
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
     }
+
+    private sealed record WorkspaceIndexAnalysis(
+        WorkspaceIndexTargetPlan TargetPlan,
+        WorkspaceIndexState PreviousState,
+        IReadOnlyDictionary<string, IndexedFileState> CurrentFiles,
+        IReadOnlyList<string> ChangedFiles,
+        IReadOnlyList<string> DeletedFiles,
+        IReadOnlyList<CodeChunk> Chunks,
+        List<string> Warnings,
+        int FilesScanned,
+        bool FullReindex,
+        bool StateCompatible,
+        bool MergeScopedState,
+        int UnchangedFileCount);
+
+    private sealed record EmbeddedChunk(CodeChunk Chunk, float[] Embedding);
+
+    private sealed record EmbeddedChunkBatch(IReadOnlyList<CodeChunk> Chunks, IReadOnlyList<float[]> Embeddings);
+
+    private sealed record EmbeddingWorkItem(string CacheKey, string Content, List<int> ChunkIndexes);
 }

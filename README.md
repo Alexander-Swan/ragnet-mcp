@@ -7,7 +7,7 @@ RagNet MCP is a .NET 10, container-first Model Context Protocol server for local
 The default setup is hybrid:
 
 - Docker starts `qdrant` on `http://localhost:6333`
-- Docker starts `ollama` on `http://localhost:11434`, unless Hybrid setup is configured to use local Ollama
+- Docker starts `ollama` on `http://localhost:11434`, unless Hybrid setup is explicitly configured to use local Ollama
 - Docker starts `ragnet-mcp` on `http://localhost:7331`
 - .NET publishes the local `ragnet-indexer` executable under `bin`
 
@@ -31,14 +31,22 @@ http://localhost:7331/health
 .\scripts\setup.ps1
 ```
 
-The setup script starts Qdrant, RagNet MCP, and Ollama in Docker, publishes the local indexer executable, pulls the default Ollama embedding model plus `nomic-embed-text` for compatibility, writes repo-local MCP registration files for Visual Studio and VS Code, registers Codex/Codex CLI when `codex` is available on PATH, and registers Claude Code when `claude` is available on PATH.
+When run from an interactive terminal with no arguments, setup asks for the setup mode, container runtime, Ollama source, extra embedding models, and MCP client registration, then shows a summary before applying changes. Press Enter through the prompts for the recommended Hybrid setup.
 
-If Ollama is already running on `localhost:11434`, Hybrid setup reuses it and starts only Qdrant in Docker.
+The default setup starts Qdrant, RagNet MCP, and Ollama in Docker, publishes the local indexer executable, pulls the default Ollama embedding model plus `nomic-embed-text` for compatibility, writes repo-local MCP registration files for Visual Studio and VS Code, registers Codex/Codex CLI when `codex` is available on PATH, and registers Claude Code when `claude` is available on PATH.
+
+By default, Hybrid setup expects Qdrant, Ollama, and RagNet MCP to run as container services while the indexer runs locally. If one of the required ports is already open, setup checks whether the matching compose service is already running and reuses/updates it; otherwise it fails early so the port conflict is clear. Use `-OllamaMode Local` or `-OllamaMode Auto` when you intentionally want to reuse a host Ollama.
 
 To force local Ollama instead of the Docker Ollama image:
 
 ```powershell
 .\scripts\setup.ps1 -Mode Hybrid -OllamaMode Local
+```
+
+For CI or scripted installs, keep passing explicit arguments:
+
+```powershell
+.\scripts\setup.ps1 -Mode Hybrid -ContainerRuntime Docker -OllamaMode Docker -SkipRegister -NonInteractive
 ```
 
 In Hybrid mode, setup leaves `ragnet-mcp` running in Docker. Check it with:
@@ -76,6 +84,8 @@ After the first `index_workspace` run, RagNet stores content-hash file fingerpri
 
 The Qdrant state point also records the workspace root, embedding model, index/analyzer schema version, last saved timestamp, and indexed file metadata. If the configured embedding model or schema version changes, RagNet automatically clears the workspace vectors and performs a full reindex. You can force the same lifecycle manually by passing `force: true` to `index_workspace` or `index_workspace_group`. Profile-scoped indexing updates only files in that profile and requires a compatible existing all-profile state.
 
+Embedding creation is batched and parallelized during indexing. Configure concurrent batch count with `RagNet:Indexing:MaxEmbeddingConcurrency` and batch size with `RagNet:Indexing:MaxEmbeddingBatchSize`; defaults are `4` and `16`. Duplicate chunk content in the same indexing run is embedded once by chunk-content hash, then reused for matching chunks. Qdrant vector upserts are also chunked with `RagNet:Qdrant:UpsertBatchSize`, default `256`.
+
 Qdrant collections are named deterministically as `{CollectionPrefix}-{workspaceId}`, where `workspaceId` is derived from the normalized workspace root rather than the raw path. The default prefix is `ragnet`. A forced/full reindex deletes the workspace collection and recreates it with the current embedding vector size. To manually reset a workspace index, run `index_workspace` with `force: true`, or delete the matching collection from Qdrant and re-run indexing.
 
 RagNet also maintains a Qdrant-backed workspace registry collection named `{CollectionPrefix}-workspace-registry`. Each successful indexing run records the workspace root, workspace id, vector collection name, configured workspace groups, indexed targets/scopes, last indexed timestamp, files scanned, chunks indexed, and whether the run was a full reindex. Search scope `all_indexed_workspaces` reads this registry, so indexed workspaces survive MCP process restarts.
@@ -99,6 +109,7 @@ Agents can trigger indexing through the `trigger_indexing` MCP tool. Humans, scr
 
 ```powershell
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln"
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --dry-run
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --force
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --workspace "D:\Work\Product\Admin\Admin.sln" --group my-product
 .\bin\ragnet-indexer.exe index -w "D:\Work\Product\Api\Api.sln" -w "D:\Work\Product\docs\api"
@@ -111,7 +122,7 @@ Agents can trigger indexing through the `trigger_indexing` MCP tool. Humans, scr
 .\bin\ragnet-indexer.exe delete workspace "D:\Work\Product\Api"
 ```
 
-The CLI prints progress for each indexing phase to stderr and leaves index/status/delete results on stdout for scripts. Pass `--no-progress` to suppress progress output. `--workspace`/`-w` is an index target: a workspace root, subdirectory, solution file, or supported file. Repeating it unions all compatible targets; for example, two solution files in the same repo index only those solution graphs, not unrelated sibling solutions. Pairing `--workspace` with `--group`/`-g` saves that target set to `.ragnet/indexer-workspace-groups.json` in the current directory, so future runs can use `index --group my-product`. Add `--add` or `-a` to append new targets to an existing local group instead of replacing it.
+The CLI prints progress for each indexing phase to stderr and leaves index/status/delete results on stdout for scripts. Pass `--no-progress` to suppress progress output. Add `--dry-run` to `index` to preview the resolved workspace root, target paths, scanned files, chunks that would be indexed, state compatibility, and changed/deleted/unchanged file counts without deleting vectors, creating embeddings, saving index state, updating the workspace registry, or writing local groups. `--workspace`/`-w` is an index target: a workspace root, subdirectory, solution file, or supported file. Repeating it unions all compatible targets; for example, two solution files in the same repo index only those solution graphs, not unrelated sibling solutions. Pairing `--workspace` with `--group`/`-g` saves that target set to `.ragnet/indexer-workspace-groups.json` in the current directory, so future runs can use `index --group my-product`. Add `--add` or `-a` to append new targets to an existing local group instead of replacing it.
 
 Use `list groups` to see configured and local indexer groups in a table. Use `list workspaces` to see indexed workspaces from the Qdrant registry in a table. `delete group` removes local indexer groups; configured groups are read-only from the CLI and should be removed from configuration. `delete workspace` removes the workspace vector collection, Qdrant registry record, and Qdrant index-state point.
 
@@ -129,6 +140,7 @@ RagNet should support both local-only and hosted/team usage without forcing the 
 - Add GitHub/GitLab/Azure DevOps-style change notifications later. Push/webhook events should enqueue incremental reindexing for affected repositories/workspaces instead of requiring a full scan every time.
 - Store enough source metadata in vector payloads for hosted search: repository URL, commit SHA, relative path, symbol details, line numbers, and chunk content. A cloud-hosted search service cannot read `D:\...` local files, so context must come from indexed payloads or a repo checkout/object store.
 - Keep full Docker indexing optional. Since `ragnet-mcp` runs in Docker by default, arbitrary host workspace paths should be indexed with the local indexer unless those paths are mounted or synced into the container.
+- Continue hardening setup for less common local environments and hosted/team deployment paths.
 
 ## Documentation Indexing TODO
 
@@ -357,6 +369,12 @@ Hybrid Docker MCP plus local indexer is the default. You can still choose full D
 .\scripts\setup.ps1 -Mode Hybrid
 .\scripts\setup.ps1 -Mode Docker
 .\scripts\setup.ps1 -Mode Native
+```
+
+Use `-ContainerRuntime Nerdctl` for Rancher Desktop or another nerdctl-compatible runtime:
+
+```powershell
+.\scripts\setup.ps1 -Mode Hybrid -ContainerRuntime Nerdctl
 ```
 
 Hybrid publishes the local indexer to:

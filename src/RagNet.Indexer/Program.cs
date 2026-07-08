@@ -38,6 +38,61 @@ catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
     Console.Error.WriteLine($"Error: {ex.Message}");
     return 1;
 }
+catch (HttpRequestException ex)
+{
+    var offlineService = GetOfflineService(ex, ragNetOptions);
+    Console.Error.WriteLine($"Error: {offlineService.Name} is offline at {offlineService.BaseUrl}.");
+    Console.Error.WriteLine($"Details: {GetInnermostMessage(ex)}");
+    Console.Error.WriteLine(offlineService.SetupHint);
+    return 1;
+}
+
+static OfflineService GetOfflineService(HttpRequestException exception, RagNetOptions options)
+{
+    var message = exception.ToString();
+    if (MessageContainsEndpoint(message, options.Qdrant.BaseUrl))
+    {
+        return new OfflineService(
+            "Qdrant",
+            options.Qdrant.BaseUrl,
+            @"Start Qdrant with: .\scripts\setup.ps1 -Mode Hybrid");
+    }
+
+    if (MessageContainsEndpoint(message, options.Ollama.BaseUrl))
+    {
+        return new OfflineService(
+            "Ollama",
+            options.Ollama.BaseUrl,
+            @"Start Ollama with: .\scripts\setup.ps1 -Mode Hybrid");
+    }
+
+    return new OfflineService(
+        "A required RagNet service",
+        $"{options.Qdrant.BaseUrl} or {options.Ollama.BaseUrl}",
+        @"Start services with: .\scripts\setup.ps1 -Mode Hybrid");
+}
+
+static bool MessageContainsEndpoint(string message, string baseUrl)
+{
+    if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
+    {
+        return message.Contains(baseUrl, StringComparison.OrdinalIgnoreCase);
+    }
+
+    var hostAndPort = uri.IsDefaultPort ? uri.Host : $"{uri.Host}:{uri.Port}";
+    return message.Contains(baseUrl, StringComparison.OrdinalIgnoreCase) ||
+        message.Contains(hostAndPort, StringComparison.OrdinalIgnoreCase);
+}
+
+static string GetInnermostMessage(Exception exception)
+{
+    while (exception.InnerException is not null)
+    {
+        exception = exception.InnerException;
+    }
+
+    return exception.Message;
+}
 
 static async Task<int> RunAsync(
     IWorkspaceIndexer indexer,
@@ -70,10 +125,18 @@ static async Task<int> RunAsync(
         {
             var workspaces = GetMany(options, "workspace") ?? [];
             var group = GetString(options, "group");
+            var dryRun = GetBool(options, "dry-run");
             if (workspaces.Count == 0 && !string.IsNullOrWhiteSpace(group))
             {
-                var groupResults = await IndexGroupAsync(indexer, group, options, progress);
-                Console.WriteLine(JsonSerializer.Serialize(groupResults, jsonOptions));
+                if (dryRun)
+                {
+                    Console.WriteLine(JsonSerializer.Serialize(await DryRunIndexGroupAsync(indexer, group, options, progress), jsonOptions));
+                }
+                else
+                {
+                    Console.WriteLine(JsonSerializer.Serialize(await IndexGroupAsync(indexer, group, options, progress), jsonOptions));
+                }
+
                 return 0;
             }
 
@@ -82,25 +145,37 @@ static async Task<int> RunAsync(
                 throw new ArgumentException("--workspace or --group is required for index.");
             }
 
-            if (!string.IsNullOrWhiteSpace(group))
+            if (!dryRun && !string.IsNullOrWhiteSpace(group))
             {
                 SaveLocalWorkspaceGroup(group, workspaces, GetBool(options, "add"));
             }
 
-            var results = (await indexer.IndexTargetsAsync(
-                workspaces,
-                GetMany(options, "exclude"),
-                GetBool(options, "force"),
-                GetString(options, "profile") ?? GetString(options, "index-profile"),
-                progress: progress)).ToList();
-
-            if (results.Count == 1)
+            var indexProfile = GetString(options, "profile") ?? GetString(options, "index-profile");
+            var excludeDirectories = GetMany(options, "exclude");
+            var force = GetBool(options, "force");
+            if (dryRun)
             {
-                Console.WriteLine(JsonSerializer.Serialize(results[0], jsonOptions));
+                var results = (await indexer.DryRunIndexTargetsAsync(
+                    workspaces,
+                    excludeDirectories,
+                    force,
+                    indexProfile,
+                    progress: progress)).ToList();
+
+                object output = results.Count == 1 ? results[0] : results;
+                Console.WriteLine(JsonSerializer.Serialize(output, jsonOptions));
             }
             else
             {
-                Console.WriteLine(JsonSerializer.Serialize(results, jsonOptions));
+                var results = (await indexer.IndexTargetsAsync(
+                    workspaces,
+                    excludeDirectories,
+                    force,
+                    indexProfile,
+                    progress: progress)).ToList();
+
+                object output = results.Count == 1 ? results[0] : results;
+                Console.WriteLine(JsonSerializer.Serialize(output, jsonOptions));
             }
 
             return 0;
@@ -309,6 +384,32 @@ static async Task<IReadOnlyList<IndexWorkspaceResult>> IndexGroupAsync(
         progress: progress);
 }
 
+static async Task<IReadOnlyList<DryRunIndexWorkspaceResult>> DryRunIndexGroupAsync(
+    IWorkspaceIndexer indexer,
+    string group,
+    Dictionary<string, List<string>> options,
+    IProgress<IndexingProgress>? progress)
+{
+    var localGroup = LoadLocalWorkspaceGroups()
+        .FirstOrDefault(candidate => string.Equals(candidate.Name, group, StringComparison.OrdinalIgnoreCase));
+    if (localGroup is not null)
+    {
+        return await indexer.DryRunIndexTargetsAsync(
+            localGroup.Roots,
+            GetMany(options, "exclude"),
+            GetBool(options, "force"),
+            GetString(options, "profile") ?? GetString(options, "index-profile"),
+            progress: progress);
+    }
+
+    return await indexer.DryRunIndexGroupAsync(
+        group,
+        GetMany(options, "exclude"),
+        GetBool(options, "force"),
+        GetString(options, "profile") ?? GetString(options, "index-profile"),
+        progress: progress);
+}
+
 static IReadOnlyList<WorkspaceGroupListItem> ListWorkspaceGroups(RagNetOptions options)
 {
     var configuredGroups = options.WorkspaceGroups
@@ -507,8 +608,8 @@ static void WriteHelp()
     RagNet Indexer
 
     Commands:
-      index       --workspace|-w <target> [--workspace|-w <target> ...] [--group|-g <name>] [--add|-a] [--force] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
-      index       --group|-g <name> [--force] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
+      index       --workspace|-w <target> [--workspace|-w <target> ...] [--group|-g <name>] [--add|-a] [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
+      index       --group|-g <name> [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
       status      --workspace <path>
       list        groups
       list        workspaces
@@ -520,10 +621,12 @@ static void WriteHelp()
       --group, -g     With --workspace, saves/replaces a local group. Without --workspace, indexes an existing local or configured group.
       --workspace, -w Index target: workspace root, directory, solution file, or supported file. Repeat to union targets.
       --add, -a       With --workspace and --group, append targets to the existing local group instead of replacing it.
+      --dry-run       Preview files and chunks that would be indexed without writing vectors, state, registry, or local groups.
       --no-progress   Suppress progress output. Index/status/delete results are written to stdout.
 
     Examples:
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln
+      ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln --dry-run
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln --workspace D:\Work\Product\Admin\Admin.sln --group my-product
       ragnet-indexer index -w D:\Work\Product\Api\Api.sln -w D:\Work\Product\docs\api
       ragnet-indexer index -w D:\Work\Product\Worker -g my-product -a
@@ -563,3 +666,5 @@ sealed record WorkspaceGroupListItem(
 sealed record DeleteWorkspaceGroupResult(string Name, string Source, string StorePath);
 
 sealed record DeleteIndexedWorkspaceResult(string WorkspaceRoot, string WorkspaceId, string CollectionName);
+
+sealed record OfflineService(string Name, string BaseUrl, string SetupHint);

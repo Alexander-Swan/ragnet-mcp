@@ -29,6 +29,8 @@ public sealed class QdrantOptions
     public string BaseUrl { get; init; } = "http://localhost:6333";
 
     public string CollectionPrefix { get; init; } = "ragnet";
+
+    public int UpsertBatchSize { get; init; } = 256;
 }
 
 public sealed class WorkspaceOptions
@@ -70,6 +72,10 @@ public sealed class WorkspaceGroupOptions
 public sealed class IndexingOptions
 {
     public int ChunkMaxChars { get; init; } = 30_000;
+
+    public int MaxEmbeddingConcurrency { get; init; } = 4;
+
+    public int MaxEmbeddingBatchSize { get; init; } = 16;
 }
 
 public sealed class ClassificationOptions

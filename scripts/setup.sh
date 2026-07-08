@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+EXPLICIT_SETUP_INPUT=0
+if [[ "$#" -gt 0 ||
+  -n "${EMBEDDING_MODEL+x}" ||
+  -n "${ADDITIONAL_EMBEDDING_MODELS+x}" ||
+  -n "${OLLAMA_MODE+x}" ||
+  -n "${CONTAINER_RUNTIME+x}" ||
+  -n "${REGISTER_CLIENTS+x}" ||
+  -n "${SKIP_MODEL_PULL+x}" ||
+  -n "${SKIP_REGISTER+x}" ||
+  -n "${NON_INTERACTIVE+x}" ]]; then
+  EXPLICIT_SETUP_INPUT=1
+fi
+
 MODE="${1:-Hybrid}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-mxbai-embed-large}"
 ADDITIONAL_EMBEDDING_MODELS="${ADDITIONAL_EMBEDDING_MODELS:-nomic-embed-text}"
-OLLAMA_MODE="${OLLAMA_MODE:-${2:-Auto}}"
+OLLAMA_MODE="${OLLAMA_MODE:-${2:-Docker}}"
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-Auto}"
+REGISTER_CLIENTS="${REGISTER_CLIENTS:-All}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="$REPO_ROOT/bin"
 
@@ -14,11 +29,204 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1
 
 cd "$REPO_ROOT"
 
+if [[ -t 1 ]]; then
+  COLOR_CYAN=$'\033[36m'
+  COLOR_GREEN=$'\033[32m'
+  COLOR_YELLOW=$'\033[33m'
+  COLOR_RED=$'\033[31m'
+  COLOR_RESET=$'\033[0m'
+else
+  COLOR_CYAN=""
+  COLOR_GREEN=""
+  COLOR_YELLOW=""
+  COLOR_RED=""
+  COLOR_RESET=""
+fi
+
+info() {
+  printf '%s%s%s\n' "$COLOR_CYAN" "$1" "$COLOR_RESET"
+}
+
+success() {
+  printf '%s%s%s\n' "$COLOR_GREEN" "$1" "$COLOR_RESET"
+}
+
+warn() {
+  printf '%sWARNING: %s%s\n' "$COLOR_YELLOW" "$1" "$COLOR_RESET" >&2
+}
+
+fail() {
+  printf '%sERROR: %s%s\n' "$COLOR_RED" "$1" "$COLOR_RESET" >&2
+  exit 1
+}
+
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
-    echo "Required command '$1' was not found on PATH." >&2
-    exit 1
+    fail "Required command '$1' was not found on PATH."
   fi
+}
+
+choose() {
+  local prompt="$1"
+  local choices="$2"
+  local default="$3"
+  local value
+  local value_lc
+  local choice_lc
+
+  while true; do
+    read -r -p "$prompt [$choices] default: $default " value
+    if [[ -z "${value// }" ]]; then
+      printf '%s\n' "$default"
+      return
+    fi
+
+    value_lc="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+    IFS='/' read -r -a parts <<< "$choices"
+    for choice in "${parts[@]}"; do
+      choice_lc="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')"
+      if [[ "$choice_lc" == "$value_lc" ]]; then
+        printf '%s\n' "$choice"
+        return
+      fi
+    done
+
+    warn "Choose one of: $choices"
+  done
+}
+
+show_summary() {
+  echo ""
+  info "Setup summary"
+  echo "  Mode:                 $MODE"
+  echo "  Container runtime:    $CONTAINER_RUNTIME"
+  echo "  Ollama mode:          $OLLAMA_MODE"
+  echo "  Embedding model:      $EMBEDDING_MODEL"
+  echo "  Additional models:    $ADDITIONAL_EMBEDDING_MODELS"
+  echo "  Pull models:          $([[ "${SKIP_MODEL_PULL:-}" == "1" || "${SKIP_MODEL_PULL:-}" == "true" ]] && echo false || echo true)"
+  echo "  MCP registration:     $REGISTER_CLIENTS"
+  echo "  MCP endpoint:         http://localhost:7331/ragnet-mcp"
+  echo "  Health endpoint:      http://localhost:7331/health"
+  echo "  Ports:                MCP 7331, Qdrant 6333/6334, Ollama 11434"
+  echo ""
+}
+
+interactive_setup() {
+  info "RagNet MCP interactive setup"
+  echo ""
+
+  MODE="$(choose "Setup mode" "Hybrid/Docker/Native" "Hybrid")"
+  if [[ "$MODE" != "Native" ]]; then
+    CONTAINER_RUNTIME="$(choose "Container runtime" "Docker/Nerdctl/Auto" "Docker")"
+  fi
+  OLLAMA_MODE="$(choose "Ollama mode/source" "Docker/Local/Auto" "Docker")"
+
+  local models
+  read -r -p "Additional embedding models, space-separated or blank for default [$ADDITIONAL_EMBEDDING_MODELS] " models
+  if [[ -n "${models// }" ]]; then
+    ADDITIONAL_EMBEDDING_MODELS="$models"
+  fi
+
+  REGISTER_CLIENTS="$(choose "MCP client registration" "All/RepoOnly/Skip" "All")"
+  show_summary
+
+  local confirm
+  confirm="$(choose "Apply these changes?" "Yes/No" "Yes")"
+  if [[ "$confirm" != "Yes" ]]; then
+    warn "Setup cancelled."
+    exit 0
+  fi
+}
+
+resolve_container_runtime() {
+  if [[ "$MODE" == "Native" ]]; then
+    return
+  fi
+
+  case "$CONTAINER_RUNTIME" in
+    Docker)
+      require_command docker
+      RESOLVED_CONTAINER_RUNTIME=docker
+      ;;
+    Nerdctl)
+      require_command nerdctl
+      RESOLVED_CONTAINER_RUNTIME=nerdctl
+      ;;
+    Auto)
+      if command -v docker >/dev/null 2>&1; then
+        RESOLVED_CONTAINER_RUNTIME=docker
+      elif command -v nerdctl >/dev/null 2>&1; then
+        RESOLVED_CONTAINER_RUNTIME=nerdctl
+      else
+        fail "No supported container runtime was found on PATH. Install Docker Desktop or Rancher Desktop with nerdctl."
+      fi
+      ;;
+    *)
+      fail "CONTAINER_RUNTIME must be Auto, Docker, or Nerdctl."
+      ;;
+  esac
+}
+
+compose() {
+  "$RESOLVED_CONTAINER_RUNTIME" compose "$@"
+}
+
+container_exec() {
+  "$RESOLVED_CONTAINER_RUNTIME" exec "$@"
+}
+
+compose_service_running() {
+  local service="$1"
+  local output
+
+  if output="$("$RESOLVED_CONTAINER_RUNTIME" compose ps --status running "$service" 2>/dev/null)" &&
+    [[ "$output" == *"$service"* ]]; then
+    return 0
+  fi
+
+  if output="$("$RESOLVED_CONTAINER_RUNTIME" compose ps "$service" 2>/dev/null)" &&
+    [[ "$output" == *"$service"* ]] &&
+    [[ "$output" =~ running|Up ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+check_service_ports() {
+  local spec
+  local service
+  local allow_external
+  local ports
+  local port
+  local is_running
+
+  for spec in "$@"; do
+    IFS='|' read -r service allow_external ports <<< "$spec"
+    is_running=0
+    if compose_service_running "$service"; then
+      is_running=1
+    fi
+
+    IFS=',' read -r -a port_list <<< "$ports"
+    for port in "${port_list[@]}"; do
+      if ! port_in_use "$port"; then
+        continue
+      fi
+
+      if [[ "$is_running" == "1" ]]; then
+        success "$service already appears to be running on port $port; setup will reuse/update it."
+        continue
+      fi
+
+      if [[ "$allow_external" == "true" ]]; then
+        warn "$service port $port is already open; setup will use the existing service."
+        continue
+      fi
+
+      fail "Port $port is already in use, but '$service' is not running in this compose project. Stop the conflicting service or choose a compatible setup mode."
+    done
+  done
 }
 
 port_in_use() {
@@ -40,28 +248,36 @@ use_ollama_container() {
   case "$OLLAMA_MODE" in
     Local)
       if ! port_in_use 11434; then
-        echo "WARNING: OLLAMA_MODE is Local, but nothing is listening on localhost:11434 yet." >&2
-        echo "WARNING: Start local Ollama before indexing, or rerun setup with OLLAMA_MODE=Docker." >&2
+        warn "OLLAMA_MODE is Local, but nothing is listening on localhost:11434 yet."
+        warn "Start local Ollama before indexing, or rerun setup with OLLAMA_MODE=Docker."
       fi
       return 1
       ;;
     Docker)
       if port_in_use 11434; then
-        echo "OLLAMA_MODE is Docker, but localhost:11434 is already in use. Stop the local service or use OLLAMA_MODE=Local." >&2
-        exit 1
+        if compose_service_running ollama; then
+          success "ollama already appears to be running on port 11434; setup will reuse/update it."
+          return 0
+        fi
+
+        fail "OLLAMA_MODE is Docker, but localhost:11434 is already in use. Stop the local service or use OLLAMA_MODE=Local."
       fi
       return 0
       ;;
     Auto)
       if port_in_use 11434; then
-        echo "WARNING: Port 11434 is already in use. Hybrid setup will use the existing Ollama at http://localhost:11434 and start only Qdrant in Docker." >&2
+        if compose_service_running ollama; then
+          success "ollama already appears to be running on port 11434; setup will reuse/update it."
+          return 0
+        fi
+
+        warn "Port 11434 is already in use. Hybrid setup will use the existing Ollama at http://localhost:11434 and start only Qdrant/RagNet MCP in containers."
         return 1
       fi
       return 0
       ;;
     *)
-      echo "OLLAMA_MODE must be Auto, Docker, or Local." >&2
-      exit 1
+      fail "OLLAMA_MODE must be Auto, Docker, or Local."
       ;;
   esac
 }
@@ -74,7 +290,7 @@ pull_ollama_model() {
   fi
 
   if [[ "$use_container" == "true" ]]; then
-    docker exec ollama ollama pull "$model"
+    container_exec ollama ollama pull "$model"
     return
   fi
 
@@ -83,8 +299,8 @@ pull_ollama_model() {
     return
   fi
 
-  echo "WARNING: Local Ollama is selected, but the ollama CLI was not found. Skipping model pull for '$model'." >&2
-  echo "WARNING: Run 'ollama pull $model' manually if the model is not already installed." >&2
+  warn "Local Ollama is selected, but the ollama CLI was not found. Skipping model pull for '$model'."
+  warn "Run 'ollama pull $model' manually if the model is not already installed."
 }
 
 pull_ollama_models() {
@@ -101,30 +317,49 @@ pull_ollama_models() {
   done
 }
 
+if [[ "$EXPLICIT_SETUP_INPUT" == "0" && -t 0 && -t 1 && -z "${CI:-}" ]]; then
+  interactive_setup
+fi
+
+if [[ "${SKIP_REGISTER:-}" == "1" || "${SKIP_REGISTER:-}" == "true" ]]; then
+  REGISTER_CLIENTS=Skip
+fi
+
+resolve_container_runtime
+
 if [[ "$MODE" == "Docker" ]]; then
-  require_command docker
   if [[ "$OLLAMA_MODE" == "Local" ]]; then
-    echo "Docker mode requires the Docker Ollama service from docker-compose.yml. Use Hybrid or Native mode with OLLAMA_MODE=Local." >&2
-    exit 1
+    fail "Docker mode requires the containerized Ollama service from docker-compose.yml. Use Hybrid or Native mode with OLLAMA_MODE=Local."
   fi
   export RAGNET_EMBEDDING_MODEL="$EMBEDDING_MODEL"
   export RAGNET_OLLAMA_BASE_URL="http://ollama:11434"
-  docker compose up -d --build
+  check_service_ports \
+    "qdrant|false|6333,6334" \
+    "ollama|false|11434" \
+    "ragnet-mcp|false|7331"
+  compose up -d --build
   pull_ollama_models true
 elif [[ "$MODE" == "Hybrid" ]]; then
-  require_command docker
   require_command dotnet
   export RAGNET_EMBEDDING_MODEL="$EMBEDDING_MODEL"
   if use_ollama_container; then
     export RAGNET_OLLAMA_BASE_URL="http://ollama:11434"
-    docker compose up -d qdrant ollama
+    check_service_ports \
+      "qdrant|false|6333,6334" \
+      "ollama|false|11434" \
+      "ragnet-mcp|false|7331"
+    compose up -d qdrant ollama
     pull_ollama_models true
   else
     export RAGNET_OLLAMA_BASE_URL="http://host.docker.internal:11434"
-    docker compose up -d qdrant
+    check_service_ports \
+      "qdrant|false|6333,6334" \
+      "ollama|true|11434" \
+      "ragnet-mcp|false|7331"
+    compose up -d qdrant
     pull_ollama_models false
   fi
-  docker compose up -d --build --no-deps ragnet-mcp
+  compose up -d --build --no-deps ragnet-mcp
   dotnet restore ./RagNet.Mcp.sln
   dotnet publish ./src/RagNet.Indexer/RagNet.Indexer.csproj \
     -c Release \
@@ -135,7 +370,7 @@ elif [[ "$MODE" == "Hybrid" ]]; then
 else
   require_command dotnet
   if [[ "$OLLAMA_MODE" == "Docker" ]]; then
-    echo "WARNING: Native mode does not start Docker Ollama. Use Hybrid mode with OLLAMA_MODE=Docker if you want setup to start Ollama in Docker." >&2
+    warn "Native mode does not start containerized Ollama. Use Hybrid mode with OLLAMA_MODE=Docker if you want setup to start Ollama in a container."
   else
     pull_ollama_models false
   fi
@@ -154,14 +389,18 @@ else
     -o "$BIN_DIR"
 fi
 
-pwsh ./scripts/register-copilot.ps1 2>/dev/null || true
+if [[ "$REGISTER_CLIENTS" == "RepoOnly" ]]; then
+  pwsh ./scripts/register-copilot.ps1 -SkipCodex -SkipClaude 2>/dev/null || true
+elif [[ "$REGISTER_CLIENTS" != "Skip" ]]; then
+  pwsh ./scripts/register-copilot.ps1 2>/dev/null || true
+fi
 
 echo ""
-echo "RagNet MCP setup complete."
+success "RagNet MCP setup complete."
 echo "MCP endpoint: http://localhost:7331/ragnet-mcp"
 echo "Health:       http://localhost:7331/health"
 if [[ "$MODE" == "Hybrid" ]]; then
-  echo "Server:       docker container ragnet-mcp"
+  echo "Server:       $RESOLVED_CONTAINER_RUNTIME container ragnet-mcp"
   echo "Indexer:      ./bin/ragnet-indexer"
 elif [[ "$MODE" == "Native" ]]; then
   echo "Server:       ./bin/ragnet-mcp"
