@@ -8,7 +8,7 @@ The default setup is hybrid:
 
 - Docker starts `qdrant` on `http://localhost:6333`
 - Docker starts `ollama` on `http://localhost:11434`, unless Hybrid setup is explicitly configured to use local Ollama
-- Docker starts `ragnet-mcp` on `http://localhost:7331`
+- Docker starts `ragnet-mcp` on `http://localhost:7331` by default
 - .NET publishes the local `ragnet-indexer` executable under `bin`
 
 Native MCP mode is still available, but the recommended local shape is Docker MCP plus the local indexer. The containerized MCP server should be treated as the shared search/query service; use the local indexer for host paths like `D:\Work\Product\Api`.
@@ -36,6 +36,18 @@ When run from an interactive terminal with no arguments, setup asks for the setu
 The default setup starts Qdrant, RagNet MCP, and Ollama in Docker, publishes the local indexer executable, pulls the default Ollama embedding model plus `nomic-embed-text` for compatibility, writes repo-local MCP registration files for Visual Studio and VS Code, registers Codex/Codex CLI when `codex` is available on PATH, and registers Claude Code when `claude` is available on PATH.
 
 By default, Hybrid setup expects Qdrant, Ollama, and RagNet MCP to run as container services while the indexer runs locally. If one of the required ports is already open, setup checks whether the matching compose service is already running and reuses/updates it; otherwise it fails early so the port conflict is clear. Use `-OllamaMode Local` or `-OllamaMode Auto` when you intentionally want to reuse a host Ollama.
+
+To expose the MCP service on a different localhost port while keeping the container port unchanged:
+
+```powershell
+.\scripts\setup.ps1 -Mode Hybrid -McpPort 8331
+```
+
+On Linux/macOS:
+
+```bash
+MCP_PORT=8331 ./scripts/setup.sh Hybrid
+```
 
 To force local Ollama instead of the Docker Ollama image:
 

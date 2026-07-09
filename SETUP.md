@@ -28,16 +28,17 @@ When setup runs in an interactive terminal with no arguments, it asks for:
 - setup mode: Hybrid, Docker, or Native
 - container runtime: Docker Desktop/docker compose, Rancher Desktop/nerdctl-compatible, or Auto
 - Ollama mode/source: Docker, Local, or Auto
+- MCP localhost port, default `7331`
 - additional embedding models
 - MCP client registration: all supported clients, repo-local files only, or skip
 
-It then shows a summary, including the fixed default ports, and asks for confirmation before applying changes. Press Enter through the prompts for the recommended Hybrid setup.
+It then shows a summary, including the selected ports, and asks for confirmation before applying changes. Press Enter through the prompts for the recommended Hybrid setup.
 
 Hybrid mode does this by default:
 
 - starts Qdrant at `http://localhost:6333`
 - starts Ollama at `http://localhost:11434` in a container
-- starts RagNet MCP at `http://localhost:7331`
+- starts RagNet MCP at `http://localhost:7331` by default
 - pulls the primary embedding model, default `mxbai-embed-large`
 - pulls additional compatibility embedding models, default `nomic-embed-text`
 - publishes `ragnet-indexer.exe`
@@ -46,6 +47,18 @@ Hybrid mode does this by default:
 By default, all services except the indexer run in containers: Qdrant, Ollama, and RagNet MCP. Before starting them, setup checks the required ports. If a port is already open because the matching compose service is already running, setup reuses/updates that service. If the port belongs to something else, setup fails early with a clear conflict message.
 
 If you already run Ollama locally and intentionally want to reuse it, choose `Local` or `Auto`. Local Ollama is reached from the MCP container through `host.docker.internal:11434`.
+
+To choose a different localhost port for the MCP HTTP service:
+
+```powershell
+.\scripts\setup.ps1 -Mode Hybrid -McpPort 8331
+```
+
+On Linux/macOS:
+
+```bash
+MCP_PORT=8331 ./scripts/setup.sh Hybrid
+```
 
 For non-interactive CI or scripted setup, pass explicit arguments:
 

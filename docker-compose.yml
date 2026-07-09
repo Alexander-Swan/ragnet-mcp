@@ -24,7 +24,7 @@ services:
     depends_on:
       - qdrant
     ports:
-      - "7331:7331"
+      - "${RAGNET_MCP_PORT:-7331}:7331"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:

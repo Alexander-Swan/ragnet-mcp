@@ -7,6 +7,7 @@ if [[ "$#" -gt 0 ||
   -n "${ADDITIONAL_EMBEDDING_MODELS+x}" ||
   -n "${OLLAMA_MODE+x}" ||
   -n "${CONTAINER_RUNTIME+x}" ||
+  -n "${MCP_PORT+x}" ||
   -n "${REGISTER_CLIENTS+x}" ||
   -n "${SKIP_MODEL_PULL+x}" ||
   -n "${SKIP_REGISTER+x}" ||
@@ -19,6 +20,7 @@ EMBEDDING_MODEL="${EMBEDDING_MODEL:-mxbai-embed-large}"
 ADDITIONAL_EMBEDDING_MODELS="${ADDITIONAL_EMBEDDING_MODELS:-nomic-embed-text}"
 OLLAMA_MODE="${OLLAMA_MODE:-${2:-Docker}}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-Auto}"
+MCP_PORT="${MCP_PORT:-7331}"
 REGISTER_CLIENTS="${REGISTER_CLIENTS:-All}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="$REPO_ROOT/bin"
@@ -96,6 +98,8 @@ choose() {
 }
 
 show_summary() {
+  local mcp_endpoint="http://localhost:${MCP_PORT}/ragnet-mcp"
+  local health_endpoint="http://localhost:${MCP_PORT}/health"
   echo ""
   info "Setup summary"
   echo "  Mode:                 $MODE"
@@ -105,9 +109,9 @@ show_summary() {
   echo "  Additional models:    $ADDITIONAL_EMBEDDING_MODELS"
   echo "  Pull models:          $([[ "${SKIP_MODEL_PULL:-}" == "1" || "${SKIP_MODEL_PULL:-}" == "true" ]] && echo false || echo true)"
   echo "  MCP registration:     $REGISTER_CLIENTS"
-  echo "  MCP endpoint:         http://localhost:7331/ragnet-mcp"
-  echo "  Health endpoint:      http://localhost:7331/health"
-  echo "  Ports:                MCP 7331, Qdrant 6333/6334, Ollama 11434"
+  echo "  MCP endpoint:         $mcp_endpoint"
+  echo "  Health endpoint:      $health_endpoint"
+  echo "  Ports:                MCP $MCP_PORT, Qdrant 6333/6334, Ollama 11434"
   echo ""
 }
 
@@ -120,6 +124,16 @@ interactive_setup() {
     CONTAINER_RUNTIME="$(choose "Container runtime" "Docker/Nerdctl/Auto" "Docker")"
   fi
   OLLAMA_MODE="$(choose "Ollama mode/source" "Docker/Local/Auto" "Docker")"
+
+  local port
+  read -r -p "MCP localhost port default: $MCP_PORT " port
+  if [[ -n "${port// }" ]]; then
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+      fail "MCP port must be a number from 1 to 65535."
+    fi
+
+    MCP_PORT="$port"
+  fi
 
   local models
   read -r -p "Additional embedding models, space-separated or blank for default [$ADDITIONAL_EMBEDDING_MODELS] " models
@@ -326,6 +340,7 @@ if [[ "${SKIP_REGISTER:-}" == "1" || "${SKIP_REGISTER:-}" == "true" ]]; then
 fi
 
 resolve_container_runtime
+export RAGNET_MCP_PORT="$MCP_PORT"
 
 if [[ "$MODE" == "Docker" ]]; then
   if [[ "$OLLAMA_MODE" == "Local" ]]; then
@@ -336,7 +351,7 @@ if [[ "$MODE" == "Docker" ]]; then
   check_service_ports \
     "qdrant|false|6333,6334" \
     "ollama|false|11434" \
-    "ragnet-mcp|false|7331"
+    "ragnet-mcp|false|$MCP_PORT"
   compose up -d --build
   pull_ollama_models true
 elif [[ "$MODE" == "Hybrid" ]]; then
@@ -347,7 +362,7 @@ elif [[ "$MODE" == "Hybrid" ]]; then
     check_service_ports \
       "qdrant|false|6333,6334" \
       "ollama|false|11434" \
-      "ragnet-mcp|false|7331"
+      "ragnet-mcp|false|$MCP_PORT"
     compose up -d qdrant ollama
     pull_ollama_models true
   else
@@ -355,7 +370,7 @@ elif [[ "$MODE" == "Hybrid" ]]; then
     check_service_ports \
       "qdrant|false|6333,6334" \
       "ollama|true|11434" \
-      "ragnet-mcp|false|7331"
+      "ragnet-mcp|false|$MCP_PORT"
     compose up -d qdrant
     pull_ollama_models false
   fi
@@ -390,15 +405,15 @@ else
 fi
 
 if [[ "$REGISTER_CLIENTS" == "RepoOnly" ]]; then
-  pwsh ./scripts/register-copilot.ps1 -SkipCodex -SkipClaude 2>/dev/null || true
+  pwsh ./scripts/register-copilot.ps1 -Url "http://localhost:${MCP_PORT}/ragnet-mcp" -SkipCodex -SkipClaude 2>/dev/null || true
 elif [[ "$REGISTER_CLIENTS" != "Skip" ]]; then
-  pwsh ./scripts/register-copilot.ps1 2>/dev/null || true
+  pwsh ./scripts/register-copilot.ps1 -Url "http://localhost:${MCP_PORT}/ragnet-mcp" 2>/dev/null || true
 fi
 
 echo ""
 success "RagNet MCP setup complete."
-echo "MCP endpoint: http://localhost:7331/ragnet-mcp"
-echo "Health:       http://localhost:7331/health"
+echo "MCP endpoint: http://localhost:${MCP_PORT}/ragnet-mcp"
+echo "Health:       http://localhost:${MCP_PORT}/health"
 if [[ "$MODE" == "Hybrid" ]]; then
   echo "Server:       $RESOLVED_CONTAINER_RUNTIME container ragnet-mcp"
   echo "Indexer:      ./bin/ragnet-indexer"

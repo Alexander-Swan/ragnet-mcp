@@ -12,6 +12,9 @@ param(
     [ValidateSet("Auto", "Docker", "Local")]
     [string]$OllamaMode = "Docker",
 
+    [ValidateRange(1, 65535)]
+    [int]$McpPort = 7331,
+
     [ValidateSet("All", "RepoOnly", "Skip")]
     [string]$RegisterClients = "All",
 
@@ -139,6 +142,8 @@ function Read-ModelList {
 }
 
 function Show-SetupSummary {
+    $mcpEndpoint = "http://localhost:$McpPort/ragnet-mcp"
+    $healthEndpoint = "http://localhost:$McpPort/health"
     Write-Host ""
     Write-SetupInfo "Setup summary"
     Write-Host "  Mode:                 $Mode"
@@ -148,9 +153,9 @@ function Show-SetupSummary {
     Write-Host "  Additional models:    $($AdditionalEmbeddingModels -join ', ')"
     Write-Host "  Pull models:          $(-not $SkipModelPull)"
     Write-Host "  MCP registration:     $(if ($SkipRegister) { 'Skip' } else { $RegisterClients })"
-    Write-Host "  MCP endpoint:         http://localhost:7331/ragnet-mcp"
-    Write-Host "  Health endpoint:      http://localhost:7331/health"
-    Write-Host "  Ports:                MCP 7331, Qdrant 6333/6334, Ollama 11434"
+    Write-Host "  MCP endpoint:         $mcpEndpoint"
+    Write-Host "  Health endpoint:      $healthEndpoint"
+    Write-Host "  Ports:                MCP $McpPort, Qdrant 6333/6334, Ollama 11434"
     Write-Host ""
 }
 
@@ -164,6 +169,16 @@ function Invoke-InteractiveSetup {
     }
 
     $script:OllamaMode = Read-SetupChoice -Prompt "Ollama mode/source" -Choices @("Docker", "Local", "Auto") -Default "Docker"
+    $portValue = Read-Host "MCP localhost port default: $McpPort"
+    if (-not [string]::IsNullOrWhiteSpace($portValue)) {
+        $parsedPort = 0
+        if (-not [int]::TryParse($portValue, [ref]$parsedPort) -or $parsedPort -lt 1 -or $parsedPort -gt 65535) {
+            throw "MCP port must be a number from 1 to 65535."
+        }
+
+        $script:McpPort = $parsedPort
+    }
+
     $script:AdditionalEmbeddingModels = Read-ModelList -DefaultModels $AdditionalEmbeddingModels
     $script:RegisterClients = Read-SetupChoice -Prompt "MCP client registration" -Choices @("All", "RepoOnly", "Skip") -Default "All"
 
@@ -348,6 +363,8 @@ if ($SkipRegister) {
 }
 
 $script:ResolvedContainerRuntime = Resolve-ContainerRuntime
+$mcpEndpoint = "http://localhost:$McpPort/ragnet-mcp"
+$healthEndpoint = "http://localhost:$McpPort/health"
 
 Push-Location $RepoRoot
 try {
@@ -358,10 +375,11 @@ try {
 
         $env:RAGNET_EMBEDDING_MODEL = $EmbeddingModel
         $env:RAGNET_OLLAMA_BASE_URL = "http://ollama:11434"
+        $env:RAGNET_MCP_PORT = $McpPort
         Test-ServicePorts @(
             @{ Name = "qdrant"; Ports = @(6333, 6334); AllowExternal = $false },
             @{ Name = "ollama"; Ports = @(11434); AllowExternal = $false },
-            @{ Name = "ragnet-mcp"; Ports = @(7331); AllowExternal = $false }
+            @{ Name = "ragnet-mcp"; Ports = @($McpPort); AllowExternal = $false }
         )
         Invoke-Compose up -d --build
 
@@ -373,13 +391,14 @@ try {
         Require-Command "dotnet"
 
         $env:RAGNET_EMBEDDING_MODEL = $EmbeddingModel
+        $env:RAGNET_MCP_PORT = $McpPort
         $useOllamaContainer = Use-OllamaContainer
         if ($useOllamaContainer) {
             $env:RAGNET_OLLAMA_BASE_URL = "http://ollama:11434"
             Test-ServicePorts @(
                 @{ Name = "qdrant"; Ports = @(6333, 6334); AllowExternal = $false },
                 @{ Name = "ollama"; Ports = @(11434); AllowExternal = $false },
-                @{ Name = "ragnet-mcp"; Ports = @(7331); AllowExternal = $false }
+                @{ Name = "ragnet-mcp"; Ports = @($McpPort); AllowExternal = $false }
             )
             Invoke-Compose up -d qdrant ollama
         }
@@ -388,7 +407,7 @@ try {
             Test-ServicePorts @(
                 @{ Name = "qdrant"; Ports = @(6333, 6334); AllowExternal = $false },
                 @{ Name = "ollama"; Ports = @(11434); AllowExternal = $true },
-                @{ Name = "ragnet-mcp"; Ports = @(7331); AllowExternal = $false }
+                @{ Name = "ragnet-mcp"; Ports = @($McpPort); AllowExternal = $false }
             )
             Invoke-Compose up -d qdrant
         }
@@ -431,17 +450,17 @@ try {
 
     if ($RegisterClients -ne "Skip") {
         if ($RegisterClients -eq "RepoOnly") {
-            & (Join-Path $PSScriptRoot "register-copilot.ps1") -SkipCodex -SkipClaude
+            & (Join-Path $PSScriptRoot "register-copilot.ps1") -Url $mcpEndpoint -SkipCodex -SkipClaude
         }
         else {
-            & (Join-Path $PSScriptRoot "register-copilot.ps1")
+            & (Join-Path $PSScriptRoot "register-copilot.ps1") -Url $mcpEndpoint
         }
     }
 
     Write-Host ""
     Write-SetupSuccess "RagNet MCP setup complete."
-    Write-Host "MCP endpoint: http://localhost:7331/ragnet-mcp"
-    Write-Host "Health:       http://localhost:7331/health"
+    Write-Host "MCP endpoint: $mcpEndpoint"
+    Write-Host "Health:       $healthEndpoint"
     if ($Mode -eq "Hybrid") {
         Write-Host "Server:       $ResolvedContainerRuntime container ragnet-mcp"
         Write-Host "Indexer:      .\bin\ragnet-indexer.exe"
