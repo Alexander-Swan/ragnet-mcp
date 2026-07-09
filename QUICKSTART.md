@@ -15,6 +15,8 @@ This starts Qdrant and RagNet MCP in Docker, starts Ollama in Docker unless loca
 - `ragnet-mcp` in Codex/Codex CLI when `codex` is available on PATH
 - `ragnet-mcp` in Claude Code when `claude` is available on PATH
 
+When setup starts the Compose Qdrant service, indexed data is persisted in the named Docker volume `ragnet-mcp_qdrant_storage`. Restarting or rebuilding containers keeps the volume; `docker compose down -v` deletes it.
+
 To use an existing local Ollama instead of the Docker Ollama image:
 
 ```powershell
@@ -63,6 +65,7 @@ For normal local workspaces, run the local indexer. `--workspace`/`-w` accepts a
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api\Api.sln" --profile docs
 .\bin\ragnet-indexer.exe index -w "D:\Work\Product\Api\Api.sln" -w "D:\Work\Product\docs\api"
 .\bin\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
+.\bin\ragnet-indexer.exe status qdrant
 ```
 
 To index multiple local targets and save that set as a local group:
@@ -83,9 +86,11 @@ Pass `workspace_path` with a file or folder inside the workspace you want indexe
 
 Use `index_profile` when you want to update a narrower slice: `all`, `code`, `docs`, `metadata`, `frontend`, or `tests`. `all` is the default.
 
-After the first run, indexing is incremental. RagNet stores content-hash file fingerprints plus embedding/index metadata in `.ragnet/state.json` and only reindexes files that changed or removes files that disappeared.
+After the first run, indexing is incremental. RagNet stores content-hash file fingerprints plus embedding/index metadata in a Qdrant-backed index-state collection and only reindexes files that changed or removes files that disappeared.
 
 Embeddings and chunk payloads are persisted in Qdrant collections named `{CollectionPrefix}-{workspaceId}`. The default collection prefix is `ragnet`, and the workspace ID is derived from the normalized workspace root.
+
+For backup/restore, prefer Qdrant snapshots. Workspace export/import is still a planned hosted/team feature, not a custom local file format.
 
 Pass `force = true` to `index_workspace` when you want to clear the workspace's Qdrant collection/state and reindex every file. You can also reset manually by deleting the workspace collection in Qdrant, then running `index_workspace` again.
 

@@ -29,6 +29,7 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $BinPath = Join-Path $RepoRoot "bin"
+$QdrantStorageVolumeName = "ragnet-mcp_qdrant_storage"
 $env:DOTNET_CLI_HOME = Join-Path $RepoRoot ".dotnet-home"
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = "1"
@@ -257,6 +258,39 @@ function Test-ComposeServiceRunning {
 
     $output = & $script:ResolvedContainerRuntime compose ps $Service 2>$null
     return $LASTEXITCODE -eq 0 -and ($output -match $Service) -and ($output -match "running|Up")
+}
+
+function Test-QdrantStorageVolume {
+    if (-not $script:ResolvedContainerRuntime) {
+        return $false
+    }
+
+    try {
+        & $script:ResolvedContainerRuntime volume inspect $QdrantStorageVolumeName *> $null
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        Write-SetupWarning "Could not inspect Qdrant storage volume '$QdrantStorageVolumeName': $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Write-QdrantPersistenceInfo {
+    param([bool]$UseQdrantContainer)
+
+    if (-not $script:ResolvedContainerRuntime) {
+        Write-SetupInfo "Qdrant persistence: Native mode uses the configured Qdrant service; setup does not manage its storage."
+        return
+    }
+
+    if ($UseQdrantContainer) {
+        $exists = Test-QdrantStorageVolume
+        Write-SetupInfo "Qdrant persistence: compose stores data in Docker volume '$QdrantStorageVolumeName' (exists: $exists)."
+        Write-Host "  Restart/rebuild keeps it. 'docker compose down -v' deletes it."
+        return
+    }
+
+    Write-SetupInfo "Qdrant persistence: setup is using an existing host Qdrant service; check that service's storage/backup policy."
 }
 
 function Test-ServicePorts {
@@ -496,6 +530,7 @@ try {
 
         Test-ServicePorts $portChecks
         Invoke-Compose up -d --build @services
+        Write-QdrantPersistenceInfo -UseQdrantContainer $useQdrantContainer
 
         if (-not $SkipModelPull) {
             Pull-OllamaModels -UseContainer $useOllamaContainer
@@ -525,6 +560,7 @@ try {
         if ($services.Count -gt 0) {
             Invoke-Compose up -d @services
         }
+        Write-QdrantPersistenceInfo -UseQdrantContainer $useQdrantContainer
 
         Pull-OllamaModels -UseContainer $useOllamaContainer
         Invoke-Compose up -d --build --no-deps ragnet-mcp
@@ -543,6 +579,7 @@ try {
 
         Publish-Indexer
         Publish-NativeServer
+        Write-QdrantPersistenceInfo -UseQdrantContainer $false
     }
 
     if ($RegisterClients -ne "Skip") {

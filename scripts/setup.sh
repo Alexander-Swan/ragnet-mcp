@@ -26,6 +26,7 @@ MCP_PORT="${MCP_PORT:-7331}"
 REGISTER_CLIENTS="${REGISTER_CLIENTS:-All}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="$REPO_ROOT/bin"
+QDRANT_STORAGE_VOLUME_NAME="ragnet-mcp_qdrant_storage"
 
 export DOTNET_CLI_HOME="$REPO_ROOT/.dotnet-home"
 export DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
@@ -396,6 +397,36 @@ compose_service_running() {
   return 1
 }
 
+qdrant_storage_volume_exists() {
+  if [[ -z "${RESOLVED_CONTAINER_RUNTIME:-}" ]]; then
+    return 1
+  fi
+
+  "$RESOLVED_CONTAINER_RUNTIME" volume inspect "$QDRANT_STORAGE_VOLUME_NAME" >/dev/null 2>&1
+}
+
+show_qdrant_persistence_info() {
+  local use_qdrant_container="$1"
+
+  if [[ -z "${RESOLVED_CONTAINER_RUNTIME:-}" ]]; then
+    info "Qdrant persistence: Native mode uses the configured Qdrant service; setup does not manage its storage."
+    return
+  fi
+
+  if [[ "$use_qdrant_container" == "true" ]]; then
+    local exists=false
+    if qdrant_storage_volume_exists; then
+      exists=true
+    fi
+
+    info "Qdrant persistence: compose stores data in Docker volume '$QDRANT_STORAGE_VOLUME_NAME' (exists: $exists)."
+    echo "  Restart/rebuild keeps it. 'docker compose down -v' deletes it."
+    return
+  fi
+
+  info "Qdrant persistence: setup is using an existing host Qdrant service; check that service's storage/backup policy."
+}
+
 check_service_ports() {
   local spec
   local service
@@ -606,6 +637,7 @@ if [[ "$MODE" == "Docker" ]]; then
     "ollama|$([[ "$use_ollama_container_result" == "true" ]] && echo false || echo true)|11434" \
     "ragnet-mcp|false|$MCP_PORT"
   compose up -d --build "${services[@]}"
+  show_qdrant_persistence_info "$use_qdrant_container_result"
   pull_ollama_models "$use_ollama_container_result"
   publish_indexer
 elif [[ "$MODE" == "Hybrid" ]]; then
@@ -631,6 +663,7 @@ elif [[ "$MODE" == "Hybrid" ]]; then
   if [[ "${#services[@]}" -gt 0 ]]; then
     compose up -d "${services[@]}"
   fi
+  show_qdrant_persistence_info "$use_qdrant_container_result"
   pull_ollama_models "$use_ollama_container_result"
   compose up -d --build --no-deps ragnet-mcp
   publish_indexer
@@ -643,6 +676,7 @@ else
   fi
   publish_indexer
   publish_native_server
+  show_qdrant_persistence_info false
 fi
 
 if [[ "$REGISTER_CLIENTS" == "RepoOnly" ]]; then

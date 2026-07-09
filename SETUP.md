@@ -52,6 +52,22 @@ If you already run Qdrant locally, no extra flag is needed. If you already run O
 
 When setup starts Docker Compose services, it writes generated Compose settings to a repo-local `.env` file. That file is ignored by git and contains the selected MCP localhost port, the MCP container's Qdrant URL, the MCP container's Ollama URL, and the embedding model. Use `.env.example` as the reference shape if you need to adjust Compose settings by hand.
 
+When setup manages Qdrant through Compose, Qdrant stores vectors, payloads, workspace registry records, groups, and index state in the named Docker volume `ragnet-mcp_qdrant_storage`. The volume survives `docker compose restart`, container recreation, and image rebuilds. It is removed by `docker compose down -v`, which deletes the local RagNet index. Setup prints whether the volume exists after it starts or reuses Qdrant.
+
+Inspect the managed volume with:
+
+```powershell
+docker volume inspect ragnet-mcp_qdrant_storage
+```
+
+For Rancher Desktop or another nerdctl-compatible runtime:
+
+```powershell
+nerdctl volume inspect ragnet-mcp_qdrant_storage
+```
+
+Prefer Qdrant snapshots for backup/restore planning. A future hosted/team workflow should automate snapshot creation, retention, and restore validation before adding any workspace export/import format.
+
 To choose a different localhost port for the MCP HTTP service:
 
 ```powershell
@@ -279,6 +295,14 @@ Check index state:
 .\bin\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
 ```
 
+Check Qdrant persistence and collection counts:
+
+```powershell
+.\bin\ragnet-indexer.exe status qdrant
+```
+
+This prints the configured Qdrant URL, collection prefix, total and matching collection counts, registered workspace count, index-state point count, and an approximate vector count when Qdrant exposes point counts.
+
 ## Search
 
 From an MCP client, use:
@@ -374,6 +398,14 @@ If indexing fails to connect to Qdrant or Ollama, check containers:
 ```powershell
 docker compose ps
 ```
+
+If indexed data disappears after maintenance, check whether the Qdrant volume still exists:
+
+```powershell
+docker volume inspect ragnet-mcp_qdrant_storage
+```
+
+`docker compose down -v` removes that volume and deletes the local Qdrant-backed RagNet index. Use `docker compose down` without `-v` when you only want to stop and remove containers.
 
 If setup fails with this message:
 

@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -203,9 +205,19 @@ static async Task<int> RunAsync(
 
         case "status":
         {
+            var target = args.Length > 1 && !args[1].StartsWith("-", StringComparison.Ordinal) && !IsHelp(args[1])
+                ? args[1].Trim().ToLowerInvariant()
+                : "workspace";
+            if (target == "qdrant")
+            {
+                var qdrantStatus = await GetQdrantStatusAsync(ragNetOptions, workspaceRegistry);
+                Console.WriteLine(JsonSerializer.Serialize(qdrantStatus, jsonOptions));
+                return 0;
+            }
+
             var workspace = Required(options, "workspace");
-            var result = await indexer.GetStatusAsync(workspace);
-            Console.WriteLine(JsonSerializer.Serialize(result, jsonOptions));
+            var workspaceStatus = await indexer.GetStatusAsync(workspace);
+            Console.WriteLine(JsonSerializer.Serialize(workspaceStatus, jsonOptions));
             return 0;
         }
 
@@ -316,6 +328,14 @@ static int GetOptionStart(string command, string[] args)
         return args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal)
             ? 3
             : 2;
+    }
+
+    if (command == "status" &&
+        args.Length > 1 &&
+        !args[1].StartsWith("-", StringComparison.Ordinal) &&
+        !IsHelp(args[1]))
+    {
+        return 2;
     }
 
     return 1;
@@ -765,6 +785,153 @@ static async Task<CreateWorkspaceGroupResult> SaveWorkspaceGroupAsync(
     return new CreateWorkspaceGroupResult(savedGroup.Name, savedGroup.Source, "qdrant", savedGroup.Roots, add && existingGroup is not null);
 }
 
+static async Task<QdrantStatusResult> GetQdrantStatusAsync(
+    RagNetOptions ragNetOptions,
+    IIndexedWorkspaceRegistry workspaceRegistry)
+{
+    using var httpClient = new HttpClient
+    {
+        BaseAddress = new Uri(EnsureTrailingSlash(ragNetOptions.Qdrant.BaseUrl))
+    };
+
+    var collectionPrefix = SanitizeCollectionPart(ragNetOptions.Qdrant.CollectionPrefix);
+    if (string.IsNullOrWhiteSpace(collectionPrefix))
+    {
+        collectionPrefix = "ragnet";
+    }
+
+    var collections = await GetQdrantCollectionsAsync(httpClient);
+    var matchingCollections = collections
+        .Where(collection => collection.Name.StartsWith($"{collectionPrefix}-", StringComparison.OrdinalIgnoreCase))
+        .OrderBy(collection => collection.Name, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+    var workspaces = await workspaceRegistry.GetIndexedWorkspacesAsync();
+    var workspaceCollectionNames = workspaces
+        .Select(workspace => workspace.CollectionName)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    long approximateVectorCount = 0;
+    var vectorCountAvailable = true;
+    foreach (var collectionName in workspaceCollectionNames)
+    {
+        var pointCount = await GetQdrantCollectionPointCountAsync(httpClient, collectionName);
+        if (pointCount.HasValue)
+        {
+            approximateVectorCount += pointCount.Value;
+        }
+        else
+        {
+            vectorCountAvailable = false;
+        }
+    }
+
+    var indexStateCollectionName = $"{collectionPrefix}-index-state";
+    var indexStateCount = matchingCollections.Any(collection => string.Equals(collection.Name, indexStateCollectionName, StringComparison.OrdinalIgnoreCase))
+        ? await GetQdrantCollectionPointCountAsync(httpClient, indexStateCollectionName)
+        : 0;
+
+    return new QdrantStatusResult(
+        ragNetOptions.Qdrant.BaseUrl,
+        collectionPrefix,
+        collections.Count,
+        matchingCollections.Length,
+        workspaces.Count,
+        indexStateCount,
+        vectorCountAvailable ? approximateVectorCount : null,
+        matchingCollections.Select(collection => collection.Name).ToArray());
+}
+
+static async Task<IReadOnlyList<QdrantCollectionListItem>> GetQdrantCollectionsAsync(HttpClient httpClient)
+{
+    using var response = await httpClient.GetAsync("collections");
+    await EnsureQdrantSuccessAsync(response, "list Qdrant collections");
+
+    using var stream = await response.Content.ReadAsStreamAsync();
+    using var document = await JsonDocument.ParseAsync(stream);
+    if (!document.RootElement.TryGetProperty("result", out var result) ||
+        !result.TryGetProperty("collections", out var collections) ||
+        collections.ValueKind != JsonValueKind.Array)
+    {
+        return [];
+    }
+
+    return collections.EnumerateArray()
+        .Select(collection => GetJsonString(collection, "name"))
+        .Where(name => !string.IsNullOrWhiteSpace(name))
+        .Select(name => new QdrantCollectionListItem(name))
+        .ToArray();
+}
+
+static async Task<long?> GetQdrantCollectionPointCountAsync(HttpClient httpClient, string collectionName)
+{
+    using var response = await httpClient.GetAsync($"collections/{Uri.EscapeDataString(collectionName)}");
+    if (response.StatusCode == HttpStatusCode.NotFound)
+    {
+        return 0;
+    }
+
+    await EnsureQdrantSuccessAsync(response, $"read Qdrant collection '{collectionName}'");
+
+    using var stream = await response.Content.ReadAsStreamAsync();
+    using var document = await JsonDocument.ParseAsync(stream);
+    if (!document.RootElement.TryGetProperty("result", out var result))
+    {
+        return null;
+    }
+
+    return GetNullableInt64(result, "points_count") ??
+        GetNullableInt64(result, "vectors_count");
+}
+
+static async Task EnsureQdrantSuccessAsync(HttpResponseMessage response, string action)
+{
+    if (response.IsSuccessStatusCode)
+    {
+        return;
+    }
+
+    var body = await response.Content.ReadAsStringAsync();
+    throw new HttpRequestException(
+        $"Failed to {action}. Qdrant returned {(int)response.StatusCode} {response.ReasonPhrase}: {body}",
+        null,
+        response.StatusCode);
+}
+
+static string EnsureTrailingSlash(string baseUrl)
+    => baseUrl.EndsWith("/", StringComparison.Ordinal) ? baseUrl : $"{baseUrl}/";
+
+static string SanitizeCollectionPart(string value)
+{
+    var chars = value
+        .Trim()
+        .ToLowerInvariant()
+        .Select(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.' ? ch : '-')
+        .ToArray();
+
+    return new string(chars).Trim('-', '_', '.');
+}
+
+static string GetJsonString(JsonElement element, string name)
+    => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+        ? value.GetString() ?? string.Empty
+        : string.Empty;
+
+static long? GetNullableInt64(JsonElement element, string name)
+{
+    if (!element.TryGetProperty(name, out var value))
+    {
+        return null;
+    }
+
+    if (value.TryGetInt64(out var result))
+    {
+        return result;
+    }
+
+    return null;
+}
+
 static string GetLocalWorkspaceGroupsPath()
     => Path.Combine(Directory.GetCurrentDirectory(), ".ragnet", "indexer-workspace-groups.json");
 
@@ -817,6 +984,7 @@ static void WriteHelp()
       index       --workspace|-w <target> [--workspace|-w <target> ...] [--current|-c] [--group|-g <name>] [--add|-a] [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
       index       --group|-g <name> [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
       status      --workspace <path>
+      status      qdrant
       eval        --queries <eval.json> [--workspace-root <path>|--group <name>] [--limit <n>] [--hybrid] [--search-profile <profile>]
       profiles
       create      group <name> --workspace|-w <indexed-name-or-root> [--workspace|-w <indexed-name-or-root> ...] [--current|-c] [--add|-a]
@@ -847,6 +1015,7 @@ static void WriteHelp()
       ragnet-indexer create group my-product --current
       ragnet-indexer index --group my-product --force
       ragnet-indexer status --workspace D:\Work\Product\Api
+      ragnet-indexer status qdrant
       ragnet-indexer eval --queries eval.json --workspace-root D:\Work\Product\Api --limit 10 --hybrid
       ragnet-indexer profiles
       ragnet-indexer list groups
@@ -892,3 +1061,15 @@ sealed record CreateWorkspaceGroupResult(
     bool Appended);
 
 sealed record OfflineService(string Name, string BaseUrl, string SetupHint);
+
+sealed record QdrantStatusResult(
+    string QdrantUrl,
+    string CollectionPrefix,
+    int CollectionsCount,
+    int MatchingCollectionsCount,
+    int RegisteredWorkspaces,
+    long? IndexStateCount,
+    long? ApproximateVectorCount,
+    IReadOnlyList<string> MatchingCollections);
+
+sealed record QdrantCollectionListItem(string Name);

@@ -41,6 +41,18 @@ By default, Hybrid setup prefers container services while the indexer runs local
 
 When setup starts Compose services, it writes generated Compose settings to a local `.env` file. That file controls the published MCP port, the MCP container's Qdrant URL, the MCP container's Ollama URL, and the embedding model, and is intentionally not committed. See `.env.example` for the supported keys.
 
+## Qdrant Persistence
+
+When setup manages Qdrant through Docker Compose, Qdrant data is stored in the named Docker volume `ragnet-mcp_qdrant_storage`. The volume survives container restarts, image rebuilds, and normal `docker compose up -d --build` runs. It is deleted by `docker compose down -v`, so do not use `-v` unless you intentionally want to remove indexed vectors, workspace registry records, groups, and index state.
+
+Setup prints whether the managed Qdrant volume exists. You can inspect it manually with:
+
+```powershell
+docker volume inspect ragnet-mcp_qdrant_storage
+```
+
+For backup and restore, prefer Qdrant snapshots over custom export files. Snapshot support keeps vector data and payloads in Qdrant's native format and avoids inventing a fragile workspace export format. Workspace-level export/import remains a planning item for hosted/team workflows.
+
 To expose the MCP service on a different localhost port while keeping the container port unchanged:
 
 ```powershell
@@ -114,6 +126,14 @@ RagNet also maintains a Qdrant-backed workspace registry collection named `{Coll
 
 Use `get_index_status` with a file or directory inside a workspace to inspect whether state exists, the last indexed timestamp, indexed file count, embedding model, schema version, and whether the stored state requires a full reindex.
 
+Use the local indexer to inspect the Qdrant persistence surface directly:
+
+```powershell
+.\bin\ragnet-indexer.exe status qdrant
+```
+
+This prints the configured Qdrant URL, collection prefix, collection counts, registered workspace count, index-state count, and an approximate vector count when Qdrant exposes point counts.
+
 ## Solution Layout
 
 The solution is split into logical assemblies:
@@ -140,6 +160,7 @@ Agents can trigger indexing through the `trigger_indexing` MCP tool. Humans, scr
 .\bin\ragnet-indexer.exe index --group my-product
 .\bin\ragnet-indexer.exe create group my-product -w Api -w Admin
 .\bin\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
+.\bin\ragnet-indexer.exe status qdrant
 .\bin\ragnet-indexer.exe list groups
 .\bin\ragnet-indexer.exe list workspaces
 .\bin\ragnet-indexer.exe delete group my-product

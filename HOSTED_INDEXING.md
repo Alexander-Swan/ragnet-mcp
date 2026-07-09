@@ -64,6 +64,17 @@ The hosted worker should persist:
 
 Qdrant can hold this initially as an operational collection, but a relational store may be better if job querying grows.
 
+## Backup And Restore Planning
+
+Use Qdrant snapshots as the first backup/restore mechanism for hosted or shared environments. Snapshots preserve collections, vectors, and payloads in Qdrant's native format, which is safer than inventing a RagNet-specific vector export format before restore requirements are stable.
+
+Planned backup/restore work:
+
+- schedule snapshots for workspace vector collections and operational collections such as workspace registry, groups, and index state;
+- document snapshot retention, storage location, and restore drills per environment;
+- add restore validation that checks collection prefix, registered workspaces, index-state count, and approximate vector count after restore;
+- defer workspace export/import until there is a clear need to move logical workspaces across Qdrant deployments without full collection snapshots.
+
 ## Incremental Rules
 
 - Path-only changes should reindex matching files and delete removed files.
@@ -78,3 +89,4 @@ Qdrant can hold this initially as an operational collection, but a relational st
 - Add provider-specific webhook mappers.
 - Add job status/list/retry/cancel MCP tools.
 - Add a worker process mode separate from the HTTP/MCP server.
+- Add Qdrant snapshot backup/restore automation and only then evaluate workspace export/import.
