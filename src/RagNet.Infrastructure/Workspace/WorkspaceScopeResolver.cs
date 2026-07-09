@@ -12,20 +12,59 @@ public sealed class WorkspaceScopeResolver(
         string? scope,
         string? workspaceRoot,
         string? workspaceGroup,
+        bool includeGroupedWorkspaces = false,
         CancellationToken cancellationToken = default)
     {
         var scopeKind = ParseScope(scope, workspaceRoot, workspaceGroup);
 
         return scopeKind switch
         {
-            WorkspaceScopeKind.CurrentWorkspace => [await workspaceDetector.DetectAsync(Required(filePath, "file_path"), cancellationToken)],
-            WorkspaceScopeKind.ExplicitWorkspaceRoot => [await workspaceDetector.DetectAsync(Required(workspaceRoot, "workspace_root"), cancellationToken)],
+            WorkspaceScopeKind.CurrentWorkspace => await ResolveWorkspaceAsync(Required(filePath, "file_path"), includeGroupedWorkspaces, cancellationToken),
+            WorkspaceScopeKind.ExplicitWorkspaceRoot => await ResolveWorkspaceAsync(Required(workspaceRoot, "workspace_root"), includeGroupedWorkspaces, cancellationToken),
             WorkspaceScopeKind.NamedWorkspaceGroup => await ResolveGroupAsync(Required(workspaceGroup, "workspace_group"), cancellationToken),
             WorkspaceScopeKind.AllIndexedWorkspaces => (await indexedWorkspaceRegistry.GetIndexedWorkspaceRootsAsync(cancellationToken))
                 .Select(root => new WorkspaceInfo(root, new DirectoryInfo(root).Name, null, null))
                 .ToArray(),
             _ => throw new InvalidOperationException($"Unsupported workspace scope '{scope}'.")
         };
+    }
+
+    private async Task<IReadOnlyList<WorkspaceInfo>> ResolveWorkspaceAsync(
+        string path,
+        bool includeGroupedWorkspaces,
+        CancellationToken cancellationToken)
+    {
+        var workspace = await workspaceDetector.DetectAsync(path, cancellationToken);
+        if (!includeGroupedWorkspaces)
+        {
+            return [workspace];
+        }
+
+        var groupRoots = await GetGroupedWorkspaceRootsAsync(workspace.RootPath, cancellationToken);
+        if (groupRoots.Count == 0)
+        {
+            return [workspace];
+        }
+
+        var resolved = new List<WorkspaceInfo> { workspace };
+        var seenRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            NormalizePath(workspace.RootPath)
+        };
+
+        foreach (var root in groupRoots)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var normalizedRoot = NormalizePath(root);
+            if (!seenRoots.Add(normalizedRoot))
+            {
+                continue;
+            }
+
+            resolved.Add(await workspaceDetector.DetectAsync(root, cancellationToken));
+        }
+
+        return resolved;
     }
 
     private async Task<IReadOnlyList<WorkspaceInfo>> ResolveGroupAsync(string groupName, CancellationToken cancellationToken)
@@ -44,6 +83,17 @@ public sealed class WorkspaceScopeResolver(
         }
 
         return workspaces;
+    }
+
+    private async Task<IReadOnlyList<string>> GetGroupedWorkspaceRootsAsync(string workspaceRoot, CancellationToken cancellationToken)
+    {
+        var normalizedWorkspaceRoot = NormalizePath(workspaceRoot);
+        var groups = await workspaceGroupRegistry.GetGroupsAsync(cancellationToken);
+
+        return groups
+            .Where(group => group.Roots.Any(root => string.Equals(NormalizePath(root), normalizedWorkspaceRoot, StringComparison.OrdinalIgnoreCase)))
+            .SelectMany(group => group.Roots)
+            .ToArray();
     }
 
     private static WorkspaceScopeKind ParseScope(string? scope, string? workspaceRoot, string? workspaceGroup)
@@ -70,4 +120,7 @@ public sealed class WorkspaceScopeResolver(
 
     private static string Required(string? value, string name)
         => string.IsNullOrWhiteSpace(value) ? throw new ArgumentException($"{name} is required for this scope.") : value;
+
+    private static string NormalizePath(string path)
+        => Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 }

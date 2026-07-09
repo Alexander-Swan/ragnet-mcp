@@ -64,9 +64,22 @@ public sealed class RagNetTools(IWorkspaceIndexer indexer)
         [Description("Content filter: code, documentation, markup, project_metadata, or all. Default is all.")] string? content_type = null,
         [Description("Ranking mode: balanced, docs_first, or code_first. Default is balanced.")] string? retrieval_mode = null,
         [Description("Search profile: all, code, docs, metadata, frontend, or tests. Default is all.")] string? search_profile = null,
+        [Description("When true, current_workspace or explicit_workspace_root searches also search every workspace in any configured group containing that workspace. Default is false.")] bool include_grouped_workspaces = false,
         [Description("Maximum number of results to return.")] int limit = 10,
         CancellationToken cancellationToken = default)
-        => indexer.SearchAsync(file_path, query, Math.Clamp(limit, 1, 50), hybrid: false, scope, workspace_root, workspace_group, content_type, retrieval_mode, search_profile, cancellationToken);
+        => indexer.SearchAsync(
+            file_path,
+            query,
+            Math.Clamp(limit, 1, 50),
+            hybrid: false,
+            scope,
+            workspace_root,
+            workspace_group,
+            content_type,
+            retrieval_mode,
+            search_profile,
+            cancellationToken,
+            include_grouped_workspaces);
 
     [McpServerTool(Name = "hybrid_search"), Description("Hybrid semantic and keyword search over indexed product context for the workspace containing file_path.")]
     public Task<IReadOnlyList<SearchResult>> HybridSearch(
@@ -78,9 +91,22 @@ public sealed class RagNetTools(IWorkspaceIndexer indexer)
         [Description("Content filter: code, documentation, markup, project_metadata, or all. Default is all.")] string? content_type = null,
         [Description("Ranking mode: balanced, docs_first, or code_first. Default is balanced.")] string? retrieval_mode = null,
         [Description("Search profile: all, code, docs, metadata, frontend, or tests. Default is all.")] string? search_profile = null,
+        [Description("When true, current_workspace or explicit_workspace_root searches also search every workspace in any configured group containing that workspace. Default is false.")] bool include_grouped_workspaces = false,
         [Description("Maximum number of results to return.")] int limit = 10,
         CancellationToken cancellationToken = default)
-        => indexer.SearchAsync(file_path, query, Math.Clamp(limit, 1, 50), hybrid: true, scope, workspace_root, workspace_group, content_type, retrieval_mode, search_profile, cancellationToken);
+        => indexer.SearchAsync(
+            file_path,
+            query,
+            Math.Clamp(limit, 1, 50),
+            hybrid: true,
+            scope,
+            workspace_root,
+            workspace_group,
+            content_type,
+            retrieval_mode,
+            search_profile,
+            cancellationToken,
+            include_grouped_workspaces);
 
     [McpServerTool(Name = "get_code_context"), Description("Return code lines around a specific file location.")]
     public Task<string> GetCodeContext(

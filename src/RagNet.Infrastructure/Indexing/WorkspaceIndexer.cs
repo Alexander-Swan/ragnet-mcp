@@ -810,10 +810,17 @@ public sealed class WorkspaceIndexer(
         string? contentType = null,
         string? retrievalMode = null,
         string? searchProfile = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool includeGroupedWorkspaces = false)
     {
         var embedding = await embeddingProvider.EmbedAsync(query, cancellationToken);
-        var workspaces = await workspaceScopeResolver.ResolveAsync(filePath, scope, workspaceRoot, workspaceGroup, cancellationToken);
+        var workspaces = await workspaceScopeResolver.ResolveAsync(
+            filePath,
+            scope,
+            workspaceRoot,
+            workspaceGroup,
+            includeGroupedWorkspaces,
+            cancellationToken);
         foreach (var workspace in workspaces)
         {
             EnsureAllowedWorkspaceRoot(workspace.RootPath);

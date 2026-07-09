@@ -57,7 +57,8 @@ public interface IWorkspaceIndexer
         string? contentType = null,
         string? retrievalMode = null,
         string? searchProfile = null,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        bool includeGroupedWorkspaces = false);
 
     Task<string> GetCodeContextAsync(string filePath, int line, int before, int after, CancellationToken cancellationToken = default);
 

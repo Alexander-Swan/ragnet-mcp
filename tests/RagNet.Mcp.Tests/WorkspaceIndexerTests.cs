@@ -728,6 +728,7 @@ public sealed class WorkspaceIndexerTests
             string? scope,
             string? workspaceRoot,
             string? workspaceGroup,
+            bool includeGroupedWorkspaces = false,
             CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<WorkspaceInfo>>([new WorkspaceInfo(_workspaceRoot, "test", null, null)]);
     }

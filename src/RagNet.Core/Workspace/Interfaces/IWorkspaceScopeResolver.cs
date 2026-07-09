@@ -7,5 +7,6 @@ public interface IWorkspaceScopeResolver
         string? scope,
         string? workspaceRoot,
         string? workspaceGroup,
+        bool includeGroupedWorkspaces = false,
         CancellationToken cancellationToken = default);
 }

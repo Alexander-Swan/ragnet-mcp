@@ -141,7 +141,8 @@ public sealed class SearchEvaluationServiceTests
             string? contentType = null,
             string? retrievalMode = null,
             string? searchProfile = null,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            bool includeGroupedWorkspaces = false)
         {
             Calls.Add(new SearchCall(limit, hybrid, workspaceRoot, searchProfile));
             return Task.FromResult(Results.GetValueOrDefault(query, []));
