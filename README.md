@@ -37,6 +37,8 @@ The default setup starts Qdrant, RagNet MCP, and Ollama in Docker, publishes the
 
 By default, Hybrid setup expects Qdrant, Ollama, and RagNet MCP to run as container services while the indexer runs locally. If one of the required ports is already open, setup checks whether the matching compose service is already running and reuses/updates it; otherwise it fails early so the port conflict is clear. Use `-OllamaMode Local` or `-OllamaMode Auto` when you intentionally want to reuse a host Ollama.
 
+When setup starts Compose services, it writes generated Compose settings to a local `.env` file. That file controls the published MCP port, the MCP container's Ollama URL, and the embedding model, and is intentionally not committed. See `.env.example` for the supported keys.
+
 To expose the MCP service on a different localhost port while keeping the container port unchanged:
 
 ```powershell
@@ -59,6 +61,12 @@ For CI or scripted installs, keep passing explicit arguments:
 
 ```powershell
 .\scripts\setup.ps1 -Mode Hybrid -ContainerRuntime Docker -OllamaMode Docker -SkipRegister -NonInteractive
+```
+
+On Linux/macOS, either pass named arguments or environment variables:
+
+```bash
+./scripts/setup.sh --mode Hybrid --container-runtime Docker --ollama-mode Docker --skip-register --non-interactive
 ```
 
 In Hybrid mode, setup leaves `ragnet-mcp` running in Docker. Check it with:

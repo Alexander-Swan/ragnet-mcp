@@ -48,6 +48,8 @@ By default, all services except the indexer run in containers: Qdrant, Ollama, a
 
 If you already run Ollama locally and intentionally want to reuse it, choose `Local` or `Auto`. Local Ollama is reached from the MCP container through `host.docker.internal:11434`.
 
+When setup starts Docker Compose services, it writes generated Compose settings to a repo-local `.env` file. That file is ignored by git and contains the selected MCP localhost port, the MCP container's Ollama URL, and the embedding model. Use `.env.example` as the reference shape if you need to adjust Compose settings by hand.
+
 To choose a different localhost port for the MCP HTTP service:
 
 ```powershell
@@ -67,6 +69,12 @@ For non-interactive CI or scripted setup, pass explicit arguments:
 ```
 
 On Linux/macOS:
+
+```bash
+./scripts/setup.sh --mode Hybrid --container-runtime Docker --ollama-mode Docker --skip-register --non-interactive
+```
+
+Environment variables are also supported for automation:
 
 ```bash
 NON_INTERACTIVE=1 SKIP_REGISTER=1 CONTAINER_RUNTIME=Docker OLLAMA_MODE=Docker ./scripts/setup.sh Hybrid
