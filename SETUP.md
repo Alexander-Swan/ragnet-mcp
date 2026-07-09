@@ -193,14 +193,15 @@ http://localhost:7331/ragnet-mcp
 
 Setup registers `ragnet-mcp` where the relevant client is available:
 
-- Visual Studio: `.mcp.json`
-- VS Code: `.vscode/mcp.json`
+- Visual Studio / GitHub Copilot app: `.mcp.json`
+- VS Code / GitHub Copilot app: `.vscode/mcp.json`
+- GitHub Copilot CLI: user-local CLI MCP registration when a compatible `copilot` or `gh copilot` command is available
 - Codex and Codex CLI: `$HOME\.codex\config.toml`
 - Claude Code: user-scope Claude MCP config
 
 All direct registrations use HTTP/streamable HTTP.
 
-In the interactive installer, choose `RepoOnly` to write only `.mcp.json` and `.vscode/mcp.json`, or `Skip` to skip registration. In non-interactive runs, use:
+In the interactive installer, choose `RepoOnly` to write only `.mcp.json` and `.vscode/mcp.json`, or `Skip` to skip registration. `RepoOnly` intentionally skips user-local Copilot CLI, Codex, and Claude registration. In non-interactive runs, use:
 
 ```powershell
 .\scripts\setup.ps1 -RegisterClients RepoOnly
@@ -223,11 +224,12 @@ To re-run only registration:
 Individual registration scripts:
 
 ```powershell
+.\scripts\register-copilot-cli.ps1
 .\scripts\register-codex.ps1
 .\scripts\register-claude.ps1
 ```
 
-Restart Visual Studio, VS Code, Codex, or Claude Code if the MCP server is not discovered immediately.
+Restart Visual Studio, VS Code, GitHub Copilot CLI, Codex, or Claude Code if the MCP server is not discovered immediately.
 
 ## Index A Workspace
 
@@ -303,6 +305,38 @@ Check Qdrant persistence and collection counts:
 
 This prints the configured Qdrant URL, collection prefix, total and matching collection counts, registered workspace count, index-state point count, and an approximate vector count when Qdrant exposes point counts.
 
+Resolve a local directory, file, solution, workspace, or group to Qdrant collection names:
+
+```powershell
+.\bin\ragnet-indexer.exe workspace collection --path "D:\Work\Product\Api\Api.sln"
+.\bin\ragnet-indexer.exe workspace collection --workspace Api
+.\bin\ragnet-indexer.exe workspace collection --group my-product
+```
+
+Export/import indexed workspace data without a full reindex when the exported vectors remain valid for the same embedding model:
+
+```powershell
+.\bin\ragnet-indexer.exe workspace export Api --output D:\Backups\ragnet-api
+.\bin\ragnet-indexer.exe workspace import --input D:\Backups\ragnet-api --workspace-root E:\Repos\Product\Api
+```
+
+For product groups:
+
+```powershell
+.\bin\ragnet-indexer.exe group export my-product --output D:\Backups\ragnet-product
+.\bin\ragnet-indexer.exe group import D:\Backups\ragnet-product --path-map D:\Work\Product=E:\Repos\Product
+```
+
+The export directory contains a versioned `ragnet-export-manifest.json` and `collections/*.jsonl` point dumps with Qdrant point ids, vectors, and payloads. The manifest includes workspace root, repository root when known, remote URL, branch, commit SHA, indexed targets, relative target paths, group records, index state, vector collection name, and vector size. `workspace import` accepts `--workspace-root` for a single workspace export. `group import` accepts repeated `--path-map <exported-root=new-root>` values so exported absolute roots can be recreated under a new checkout root.
+
+Existing Qdrant data is still usable. To enrich existing workspace registry records with export-friendly source metadata, run:
+
+```powershell
+.\bin\ragnet-indexer.exe workspace migrate
+```
+
+Migration keeps schema version `1`, rewrites records in place with repository/relative metadata when local git state can be inferred, and reports paths it cannot inspect.
+
 ## Search
 
 From an MCP client, use:
@@ -318,6 +352,17 @@ hybrid_search
 ```
 
 Provide a `file_path` inside an indexed workspace and a natural-language query.
+
+When the current repository is part of a saved workspace group and you want that one search to include the rest of the product, pass:
+
+```json
+{
+  "scope": "current_workspace",
+  "include_grouped_workspaces": true
+}
+```
+
+This is a per-call MCP tool argument. Leave it false when you want strictly local workspace results, or use `scope: "named_workspace_group"` with `workspace_group` when the agent should explicitly search a specific group.
 
 ## Setup Modes
 

@@ -90,7 +90,16 @@ After the first run, indexing is incremental. RagNet stores content-hash file fi
 
 Embeddings and chunk payloads are persisted in Qdrant collections named `{CollectionPrefix}-{workspaceId}`. The default collection prefix is `ragnet`, and the workspace ID is derived from the normalized workspace root.
 
-For backup/restore, prefer Qdrant snapshots. Workspace export/import is still a planned hosted/team feature, not a custom local file format.
+For full Qdrant backup/restore, prefer snapshots. To move one indexed workspace or group without reindexing, use:
+
+```powershell
+.\bin\ragnet-indexer.exe workspace export Api --output D:\Backups\ragnet-api
+.\bin\ragnet-indexer.exe workspace import --input D:\Backups\ragnet-api --workspace-root E:\Repos\Product\Api
+.\bin\ragnet-indexer.exe group export my-product --output D:\Backups\ragnet-product
+.\bin\ragnet-indexer.exe group import D:\Backups\ragnet-product --path-map D:\Work\Product=E:\Repos\Product
+```
+
+Use `workspace collection --path <file-or-directory>` to see which Qdrant collection backs a local path, and `workspace migrate` to enrich older registry records with export-friendly source metadata when it can be inferred.
 
 Pass `force = true` to `index_workspace` when you want to clear the workspace's Qdrant collection/state and reindex every file. You can also reset manually by deleting the workspace collection in Qdrant, then running `index_workspace` again.
 

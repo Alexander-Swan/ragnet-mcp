@@ -51,7 +51,35 @@ Setup prints whether the managed Qdrant volume exists. You can inspect it manual
 docker volume inspect ragnet-mcp_qdrant_storage
 ```
 
-For backup and restore, prefer Qdrant snapshots over custom export files. Snapshot support keeps vector data and payloads in Qdrant's native format and avoids inventing a fragile workspace export format. Workspace-level export/import remains a planning item for hosted/team workflows.
+For full-instance backup and restore, prefer Qdrant snapshots. For moving one indexed workspace or product group between Qdrant deployments, use the local indexer workspace export commands:
+
+```powershell
+.\bin\ragnet-indexer.exe workspace export Api --output D:\Backups\ragnet-api
+.\bin\ragnet-indexer.exe group export my-product --output D:\Backups\ragnet-product
+```
+
+Exports write a versioned `ragnet-export-manifest.json` plus JSONL Qdrant point dumps that include vectors and payloads. The manifest records workspace root, repository root when known, remote URL, branch, commit SHA, indexed targets, relative target paths, groups, index state, vector collection name, and vector size.
+
+Import a single workspace by mapping the exported relative paths to a new local root:
+
+```powershell
+.\bin\ragnet-indexer.exe workspace import --input D:\Backups\ragnet-api --workspace-root E:\Repos\Product\Api
+```
+
+Import a group with one or more root maps:
+
+```powershell
+.\bin\ragnet-indexer.exe group import D:\Backups\ragnet-product --path-map D:\Work\Product=E:\Repos\Product
+```
+
+Use `workspace collection` to resolve a local path, workspace, or group to its Qdrant collection:
+
+```powershell
+.\bin\ragnet-indexer.exe workspace collection --path E:\Repos\Product\Api\Api.sln
+.\bin\ragnet-indexer.exe workspace collection --group my-product
+```
+
+Existing absolute-path registry records remain supported. Run `workspace migrate` after upgrading to rewrite current workspace registry records with export-friendly source metadata when it can be inferred from local git state.
 
 To expose the MCP service on a different localhost port while keeping the container port unchanged:
 
@@ -122,7 +150,7 @@ Embedding creation is batched and parallelized during indexing. Configure concur
 
 Qdrant collections are named deterministically as `{CollectionPrefix}-{workspaceId}`, where `workspaceId` is derived from the normalized workspace root rather than the raw path. The default prefix is `ragnet`. A forced/full reindex deletes the workspace collection and recreates it with the current embedding vector size. To manually reset a workspace index, run `index_workspace` with `force: true`, or delete the matching collection from Qdrant and re-run indexing.
 
-RagNet also maintains a Qdrant-backed workspace registry collection named `{CollectionPrefix}-workspace-registry`. Each successful indexing run records the workspace root, workspace id, vector collection name, configured workspace groups, indexed targets/scopes, last indexed timestamp, files scanned, chunks indexed, and whether the run was a full reindex. Search scope `all_indexed_workspaces` reads this registry, so indexed workspaces survive MCP process restarts.
+RagNet also maintains a Qdrant-backed workspace registry collection named `{CollectionPrefix}-workspace-registry`. Each successful indexing run records the workspace root, workspace id, vector collection name, configured workspace groups, indexed targets/scopes, source identity metadata when available, relative target paths, last indexed timestamp, files scanned, chunks indexed, and whether the run was a full reindex. Search scope `all_indexed_workspaces` reads this registry, so indexed workspaces survive MCP process restarts.
 
 Use `get_index_status` with a file or directory inside a workspace to inspect whether state exists, the last indexed timestamp, indexed file count, embedding model, schema version, and whether the stored state requires a full reindex.
 
@@ -229,6 +257,7 @@ RagNet should support both local-only and hosted/team usage without forcing the 
 - Add GitHub/GitLab/Azure DevOps-style change notifications later. Push/webhook events should enqueue incremental reindexing for affected repositories/workspaces instead of requiring a full scan every time.
 - Store enough source metadata in vector payloads for hosted search: repository URL, commit SHA, relative path, symbol details, line numbers, and chunk content. A cloud-hosted search service cannot read `D:\...` local files, so context must come from indexed payloads or a repo checkout/object store.
 - Keep full Docker indexing optional. Since `ragnet-mcp` runs in Docker by default, arbitrary host workspace paths should be indexed with the local indexer unless those paths are mounted or synced into the container.
+- Simplify indexing progress output. Progress lines should show only time, workspace, action, and current/total. Current values should be monotonic per action so users can see progress at a glance; they do not need to identify the exact embedding or chunk being processed.
 - Continue hardening setup for less common local environments and hosted/team deployment paths.
 
 See [HOSTED_INDEXING.md](HOSTED_INDEXING.md) for the hosted worker/job lifecycle design.
@@ -383,11 +412,13 @@ Search defaults to the current workspace only. To search beyond the current work
 
 For a group search, pass `scope: "named_workspace_group"` and `workspace_group: "billing-product"` to `search_code` or `hybrid_search`.
 
+For a workspace search that should automatically include sibling repos in the same product group, keep `scope` as `current_workspace` or `explicit_workspace_root` and pass `include_grouped_workspaces: true`. This expands only that request; it does not change the repo or server default.
+
 Use `search_profile` when you want a narrower retrieval surface, such as `docs`, `metadata`, `frontend`, or `tests`. `content_type` remains available for lower-level filters like `documentation`, `project_metadata`, or `markup`.
 
 ## Visual Studio and GitHub Copilot
 
-Visual Studio registration is repo-local:
+Visual Studio / GitHub Copilot app registration is repo-local:
 
 ```json
 {
@@ -405,7 +436,7 @@ This is written to `.mcp.json` and uses streamable HTTP.
 
 ## VS Code and GitHub Copilot
 
-VS Code registration is repo-local:
+VS Code / GitHub Copilot app registration is repo-local:
 
 ```json
 {
@@ -419,6 +450,16 @@ VS Code registration is repo-local:
 ```
 
 This is written to `.vscode/mcp.json`.
+
+## GitHub Copilot CLI
+
+GitHub Copilot CLI registration is user-local when a compatible CLI is installed:
+
+```powershell
+.\scripts\register-copilot-cli.ps1
+```
+
+The main registration script calls this automatically unless `-SkipCopilotCli` is passed. The helper probes `copilot mcp` first and then `gh copilot mcp`, because Copilot CLI packaging differs by installation channel.
 
 ## Codex and Codex CLI
 

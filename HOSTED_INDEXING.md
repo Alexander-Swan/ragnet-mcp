@@ -66,14 +66,16 @@ Qdrant can hold this initially as an operational collection, but a relational st
 
 ## Backup And Restore Planning
 
-Use Qdrant snapshots as the first backup/restore mechanism for hosted or shared environments. Snapshots preserve collections, vectors, and payloads in Qdrant's native format, which is safer than inventing a RagNet-specific vector export format before restore requirements are stable.
+Use Qdrant snapshots as the first backup/restore mechanism for hosted or shared environments. Snapshots preserve collections, vectors, and payloads in Qdrant's native format and remain the right tool for whole-instance backup/restore.
+
+Use `ragnet-indexer workspace export`, `workspace import`, `group export`, and `group import` for logical moves of one workspace or product group between Qdrant deployments. These commands write a versioned manifest plus JSONL Qdrant point dumps and support path remapping to a new checkout root.
 
 Planned backup/restore work:
 
 - schedule snapshots for workspace vector collections and operational collections such as workspace registry, groups, and index state;
 - document snapshot retention, storage location, and restore drills per environment;
 - add restore validation that checks collection prefix, registered workspaces, index-state count, and approximate vector count after restore;
-- defer workspace export/import until there is a clear need to move logical workspaces across Qdrant deployments without full collection snapshots.
+- add hosted validation around logical workspace/group imports, including embedding model compatibility and path-map checks.
 
 ## Incremental Rules
 
