@@ -680,7 +680,7 @@ else
 fi
 
 if [[ "$REGISTER_CLIENTS" == "RepoOnly" ]]; then
-  pwsh ./scripts/register-copilot.ps1 -Url "http://localhost:${MCP_PORT}/ragnet-mcp" -SkipCodex -SkipClaude 2>/dev/null || true
+  pwsh ./scripts/register-copilot.ps1 -Url "http://localhost:${MCP_PORT}/ragnet-mcp" -SkipCopilotCli -SkipCodex -SkipClaude 2>/dev/null || true
 elif [[ "$REGISTER_CLIENTS" != "Skip" ]]; then
   pwsh ./scripts/register-copilot.ps1 -Url "http://localhost:${MCP_PORT}/ragnet-mcp" 2>/dev/null || true
 fi

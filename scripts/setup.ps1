@@ -584,7 +584,7 @@ try {
 
     if ($RegisterClients -ne "Skip") {
         if ($RegisterClients -eq "RepoOnly") {
-            & (Join-Path $PSScriptRoot "register-copilot.ps1") -Url $mcpEndpoint -SkipCodex -SkipClaude
+            & (Join-Path $PSScriptRoot "register-copilot.ps1") -Url $mcpEndpoint -SkipCopilotCli -SkipCodex -SkipClaude
         }
         else {
             & (Join-Path $PSScriptRoot "register-copilot.ps1") -Url $mcpEndpoint

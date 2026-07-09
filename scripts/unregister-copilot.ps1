@@ -1,5 +1,6 @@
 param(
     [switch]$RemoveFiles,
+    [switch]$SkipCopilotCli,
     [switch]$SkipCodex,
     [switch]$SkipClaude
 )
@@ -24,11 +25,47 @@ else {
     Write-Host "RagNet MCP registration is repo-local:"
     Write-Host "  .mcp.json"
     Write-Host "  .vscode/mcp.json"
+    Write-Host "GitHub Copilot CLI registration is user-local when a compatible Copilot CLI is installed."
     Write-Host "Codex registration is user-local:"
     Write-Host "  $HOME\.codex\config.toml"
     Write-Host "Claude Code registration is user-local by default:"
     Write-Host "  claude mcp list"
     Write-Host "Run with -RemoveFiles to remove repo-local files, Codex registration, and Claude Code registration."
+}
+
+if ($RemoveFiles -and -not $SkipCopilotCli) {
+    $copilot = Get-Command "copilot" -ErrorAction SilentlyContinue
+    if ($copilot) {
+        try {
+            & copilot mcp remove "ragnet-mcp" | Out-Host
+            Write-Host "Removed GitHub Copilot CLI MCP server: ragnet-mcp"
+        }
+        catch {
+            Write-Warning "GitHub Copilot CLI MCP server ragnet-mcp was not removed with copilot: $($_.Exception.Message)"
+        }
+    }
+
+    $gh = Get-Command "gh" -ErrorAction SilentlyContinue
+    if (-not $gh -and $env:ProgramFiles) {
+        $candidate = Join-Path $env:ProgramFiles "GitHub CLI\gh.exe"
+        if (Test-Path $candidate) {
+            $gh = [pscustomobject]@{ Source = $candidate }
+        }
+    }
+
+    if ($gh) {
+        try {
+            & $gh.Source copilot -- mcp remove "ragnet-mcp" | Out-Host
+            Write-Host "Removed GitHub Copilot CLI MCP server through gh copilot: ragnet-mcp"
+        }
+        catch {
+            Write-Warning "GitHub Copilot CLI MCP server ragnet-mcp was not removed with gh copilot: $($_.Exception.Message)"
+        }
+    }
+
+    if (-not $copilot -and -not $gh) {
+        Write-Warning "GitHub Copilot CLI was not found on PATH; skipping GitHub Copilot CLI MCP unregister."
+    }
 }
 
 if ($RemoveFiles -and -not $SkipCodex) {

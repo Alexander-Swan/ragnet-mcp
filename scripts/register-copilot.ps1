@@ -1,6 +1,7 @@
 param(
     [string]$Url = "http://localhost:7331/ragnet-mcp",
     [string]$Name = "ragnet-mcp",
+    [switch]$SkipCopilotCli,
     [switch]$SkipCodex,
     [switch]$SkipClaude
 )
@@ -8,6 +9,16 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $VsCodeDir = Join-Path $RepoRoot ".vscode"
+
+function Write-Utf8Json {
+    param(
+        [Parameter(Mandatory = $true)] [object]$Value,
+        [Parameter(Mandatory = $true)] [string]$Path
+    )
+
+    $json = $Value | ConvertTo-Json -Depth 8
+    [System.IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+}
 
 if (-not (Test-Path $VsCodeDir)) {
     New-Item -ItemType Directory -Path $VsCodeDir | Out-Null
@@ -32,17 +43,16 @@ $VsCodeConfig = [ordered]@{
     }
 }
 
-$VisualStudioConfig |
-    ConvertTo-Json -Depth 8 |
-    Set-Content -Path (Join-Path $RepoRoot ".mcp.json") -Encoding utf8
-
-$VsCodeConfig |
-    ConvertTo-Json -Depth 8 |
-    Set-Content -Path (Join-Path $VsCodeDir "mcp.json") -Encoding utf8
+Write-Utf8Json -Value $VisualStudioConfig -Path (Join-Path $RepoRoot ".mcp.json")
+Write-Utf8Json -Value $VsCodeConfig -Path (Join-Path $VsCodeDir "mcp.json")
 
 Write-Host "Registered MCP configs:"
-Write-Host "  Visual Studio: .mcp.json"
-Write-Host "  VS Code:       .vscode/mcp.json"
+Write-Host "  Visual Studio / GitHub Copilot app: .mcp.json"
+Write-Host "  VS Code / GitHub Copilot app:       .vscode/mcp.json"
+
+if (-not $SkipCopilotCli) {
+    & (Join-Path $PSScriptRoot "register-copilot-cli.ps1") -Url $Url -Name $Name -Optional
+}
 
 if (-not $SkipCodex) {
     & (Join-Path $PSScriptRoot "register-codex.ps1") -Url $Url -Name $Name -Optional
