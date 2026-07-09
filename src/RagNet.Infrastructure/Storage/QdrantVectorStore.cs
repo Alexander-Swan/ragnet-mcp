@@ -180,9 +180,14 @@ public sealed class QdrantVectorStore(
         using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
         var tokens = query.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-        var points = document.RootElement.GetProperty("result").TryGetProperty("points", out var resultPoints)
+        var resultElement = document.RootElement.GetProperty("result");
+        var points = resultElement.ValueKind == JsonValueKind.Object && resultElement.TryGetProperty("points", out var resultPoints)
             ? resultPoints
-            : document.RootElement.GetProperty("result");
+            : resultElement;
+        if (points.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
 
         return points
             .EnumerateArray()
@@ -283,6 +288,7 @@ public sealed class QdrantVectorStore(
             remote_url = chunk.Source?.RemoteUrl,
             branch = chunk.Source?.Branch,
             commit_sha = chunk.Source?.CommitSha,
+            schema_version = IndexSchemaVersions.Current,
             relative_path = chunk.Source?.RelativePath,
             source_workspace_id = chunk.Source?.WorkspaceId,
             source_project_id = chunk.Source?.ProjectId,
@@ -309,6 +315,9 @@ public sealed class QdrantVectorStore(
         var semanticScore = point.TryGetProperty("score", out var score) ? score.GetDouble() : 0d;
         var content = GetString(payload, "content");
         var keywordScore = hybrid ? KeywordScore(content, tokens) : 0d;
+        IndexSchemaVersions.EnsureCompatible(
+            IndexSchemaVersions.ReadPayloadVersion(payload),
+            $"Qdrant vector payload for '{GetString(payload, "file_path")}'");
 
         var indexProfile = GetString(payload, "index_profile");
         return new SearchResult(

@@ -42,7 +42,7 @@ public sealed class QdrantWorkspaceIndexStateStoreTests
                 [filePath] = new IndexedFileState(filePath, "abc123", 42, savedAt, ChunkCount: 7)
             },
             "test-model",
-            "test-schema",
+            IndexSchemaVersions.CurrentText,
             savedAt,
             StateExists: true));
 
@@ -58,7 +58,7 @@ public sealed class QdrantWorkspaceIndexStateStoreTests
         var payload = document.RootElement.GetProperty("points")[0].GetProperty("payload");
         Assert.Equal(Path.GetFullPath(workspaceRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), payload.GetProperty("workspace_root").GetString());
         Assert.Equal("test-model", payload.GetProperty("embedding_model").GetString());
-        Assert.Equal("test-schema", payload.GetProperty("schema_version").GetString());
+        Assert.Equal(IndexSchemaVersions.Current, payload.GetProperty("schema_version").GetInt32());
         Assert.Equal("abc123", payload.GetProperty("files")[0].GetProperty("fingerprint").GetString());
         Assert.Equal(7, payload.GetProperty("files")[0].GetProperty("chunk_count").GetInt32());
     }
@@ -79,7 +79,7 @@ public sealed class QdrantWorkspaceIndexStateStoreTests
                     "workspace_root": {{JsonSerializer.Serialize(workspaceRoot)}},
                     "workspace_id": "workspace-id",
                     "embedding_model": "test-model",
-                    "schema_version": "test-schema",
+                    "schema_version": "1",
                     "saved_at_utc": "2026-07-07T12:34:56+00:00",
                     "files": [
                       {
@@ -101,7 +101,7 @@ public sealed class QdrantWorkspaceIndexStateStoreTests
 
         Assert.True(state.StateExists);
         Assert.Equal("test-model", state.EmbeddingModel);
-        Assert.Equal("test-schema", state.SchemaVersion);
+        Assert.Equal(IndexSchemaVersions.CurrentText, state.SchemaVersion);
         var fileState = Assert.Single(state.Files.Values);
         Assert.Equal(Path.GetFullPath(filePath), fileState.FilePath);
         Assert.Equal("abc123", fileState.Fingerprint);

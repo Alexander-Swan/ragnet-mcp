@@ -15,7 +15,7 @@ namespace RagNet.Mcp.Tests;
 
 public sealed class WorkspaceIndexerTests
 {
-    private const string CurrentSchemaVersion = "ragnet-index-v2/analyzers-v8";
+    private const string CurrentSchemaVersion = "1";
 
     [Fact]
     public async Task IndexAsync_ReindexesOnlyChangedFilesAndDeletesRemovedFiles()

@@ -85,7 +85,7 @@ public sealed class QdrantWorkspaceIndexStateStore(
                             workspace_root = workspaceRoot,
                             workspace_id = workspaceId,
                             embedding_model = state.EmbeddingModel,
-                            schema_version = state.SchemaVersion,
+                            schema_version = IndexSchemaVersions.Current,
                             saved_at_utc = state.SavedAtUtc,
                             files = state.Files.Values
                                 .OrderBy(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
@@ -199,7 +199,7 @@ public sealed class QdrantWorkspaceIndexStateStore(
             NormalizePath(workspaceRoot),
             files,
             GetNullableString(payload, "embedding_model"),
-            GetNullableString(payload, "schema_version"),
+            IndexSchemaVersions.ReadPayloadVersion(payload),
             GetNullableDateTimeOffset(payload, "saved_at_utc"),
             StateExists: true);
         return true;

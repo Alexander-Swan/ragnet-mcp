@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using RagNet.Mcp.Configuration;
+using RagNet.Mcp.Indexing;
 using RagNet.Mcp.Workspace;
 
 namespace RagNet.Mcp.Tests;
@@ -36,6 +37,7 @@ public sealed class QdrantWorkspaceGroupRegistryTests
         using var document = JsonDocument.Parse(handler.Requests[2].Body);
         var payload = document.RootElement.GetProperty("points")[0].GetProperty("payload");
         Assert.Equal("Team", payload.GetProperty("group_name").GetString());
+        Assert.Equal(IndexSchemaVersions.Current, payload.GetProperty("schema_version").GetInt32());
         Assert.Equal("shared", payload.GetProperty("source").GetString());
         Assert.Equal("bin", payload.GetProperty("exclude_directories")[0].GetString());
         Assert.Equal(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), payload.GetProperty("roots")[0].GetString());

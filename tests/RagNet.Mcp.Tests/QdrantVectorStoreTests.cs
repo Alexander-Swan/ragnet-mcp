@@ -41,6 +41,46 @@ public sealed class QdrantVectorStoreTests
 
         Assert.Equal(2, upsertRequests.Length);
         Assert.Equal([2, 1], upsertRequests.Select(CountPoints).ToArray());
+
+        using var document = JsonDocument.Parse(upsertRequests[0].Body);
+        var payload = document.RootElement.GetProperty("points")[0].GetProperty("payload");
+        Assert.Equal(IndexSchemaVersions.Current, payload.GetProperty("schema_version").GetInt32());
+    }
+
+    [Fact]
+    public async Task SearchAsync_RejectsUnsupportedStoredSchemaVersion()
+    {
+        using var handler = new FakeQdrantHandler();
+        handler.Enqueue(HttpStatusCode.OK, """{"result":{"status":"green"}}""");
+        handler.Enqueue(HttpStatusCode.OK, """
+            {
+              "result": [
+                {
+                  "score": 0.8,
+                  "payload": {
+                    "schema_version": "999",
+                    "file_path": "/repo/src/Program.cs",
+                    "symbol_name": "Program",
+                    "symbol_kind": "file",
+                    "start_line": 1,
+                    "end_line": 2,
+                    "preview": "preview",
+                    "content": "content",
+                    "content_type": "code",
+                    "index_profile": "code",
+                    "language": "csharp"
+                  }
+                }
+              ]
+            }
+            """);
+        var store = CreateStore(handler);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            store.SearchAsync(Path.GetTempPath(), [1f, 0f], "program", 10, hybrid: false));
+
+        Assert.Contains("schema version '999'", exception.Message);
+        Assert.Contains(IndexSchemaVersions.Current.ToString(), exception.Message);
     }
 
     [Fact]

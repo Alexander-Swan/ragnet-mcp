@@ -34,7 +34,9 @@ public sealed class FileWorkspaceIndexStateStore : IWorkspaceIndexStateStore
             workspaceRoot,
             files,
             state?.EmbeddingModel,
-            state?.SchemaVersion,
+            state?.SchemaVersion is { } schemaVersion
+                ? IndexSchemaVersions.ReadVersion(schemaVersion)
+                : null,
             state?.SavedAtUtc,
             true);
     }
@@ -44,12 +46,14 @@ public sealed class FileWorkspaceIndexStateStore : IWorkspaceIndexStateStore
         var path = GetStatePath(state.WorkspaceRoot);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
-        var payload = new PersistedWorkspaceIndexState(
-            state.WorkspaceRoot,
-            state.EmbeddingModel,
-            state.SchemaVersion,
-            state.SavedAtUtc,
-            state.Files.Values.OrderBy(file => file.FilePath, StringComparer.OrdinalIgnoreCase).ToArray());
+        var payload = new
+        {
+            workspaceRoot = state.WorkspaceRoot,
+            embeddingModel = state.EmbeddingModel,
+            schemaVersion = IndexSchemaVersions.Current,
+            savedAtUtc = state.SavedAtUtc,
+            files = state.Files.Values.OrderBy(file => file.FilePath, StringComparer.OrdinalIgnoreCase).ToArray()
+        };
 
         await using var stream = File.Create(path);
         await JsonSerializer.SerializeAsync(stream, payload, JsonOptions, cancellationToken);
@@ -81,7 +85,7 @@ public sealed class FileWorkspaceIndexStateStore : IWorkspaceIndexStateStore
     private sealed record PersistedWorkspaceIndexState(
         string WorkspaceRoot,
         string? EmbeddingModel,
-        string? SchemaVersion,
+        JsonElement? SchemaVersion,
         DateTimeOffset? SavedAtUtc,
         IReadOnlyList<IndexedFileState> Files);
 }

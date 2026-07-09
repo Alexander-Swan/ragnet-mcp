@@ -31,7 +31,6 @@ public sealed class WorkspaceIndexer(
     ISourceIdentityResolver sourceIdentityResolver,
     IOptions<RagNetOptions> options) : IWorkspaceIndexer
 {
-    private const string IndexSchemaVersion = "ragnet-index-v2/analyzers-v8";
     private const int SearchCandidateMultiplier = 5;
     private const int MaxEmbeddingConcurrencyLimit = 16;
     private const int MaxEmbeddingBatchSizeLimit = 128;
@@ -234,7 +233,7 @@ public sealed class WorkspaceIndexer(
             workspaceRoot,
             filesToSave,
             modelResolution.SelectedModel,
-            IndexSchemaVersion,
+            IndexSchemaVersions.CurrentText,
             indexedAtUtc,
             StateExists: true), cancellationToken);
 
@@ -1212,7 +1211,7 @@ public sealed class WorkspaceIndexer(
     private static bool IsStateCompatible(WorkspaceIndexState state, string embeddingModel)
         => state.StateExists &&
             string.Equals(state.EmbeddingModel, embeddingModel, StringComparison.Ordinal) &&
-            string.Equals(state.SchemaVersion, IndexSchemaVersion, StringComparison.Ordinal);
+            IndexSchemaVersions.IsCompatible(state.SchemaVersion);
 
     private static string? NormalizeContentType(string? contentType)
     {

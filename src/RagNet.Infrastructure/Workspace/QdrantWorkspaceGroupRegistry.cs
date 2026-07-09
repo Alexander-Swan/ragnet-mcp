@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RagNet.Mcp.Configuration;
+using RagNet.Mcp.Indexing;
 using RagNet.Mcp.Storage;
 using RagNet.Mcp.Workspace.Interfaces;
 
@@ -75,6 +76,7 @@ public sealed class QdrantWorkspaceGroupRegistry(
                         payload = new
                         {
                             group_name = group.Name,
+                            schema_version = IndexSchemaVersions.Current,
                             source = WorkspaceGroupSources.Shared,
                             roots = group.Roots,
                             exclude_directories = group.ExcludeDirectories,
@@ -283,6 +285,9 @@ public sealed class QdrantWorkspaceGroupRegistry(
             return false;
         }
 
+        IndexSchemaVersions.EnsureCompatible(
+            IndexSchemaVersions.ReadPayloadVersion(payload),
+            $"Qdrant workspace group record '{name}'");
         group = new WorkspaceGroupRecord(
             name.Trim(),
             WorkspaceGroupSources.Shared,
