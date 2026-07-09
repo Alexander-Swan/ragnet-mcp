@@ -419,7 +419,7 @@ public sealed class WorkspaceIndexerTests
     }
 
     [Fact]
-    public async Task IndexAsync_ProfileScopedRunRequiresCompatibleState()
+    public async Task IndexAsync_ProfileScopedRunRequiresCompatibleExistingState()
     {
         using var workspace = new TemporaryWorkspace();
         workspace.WriteFile("docs/guide.md", "docs");
@@ -429,7 +429,29 @@ public sealed class WorkspaceIndexerTests
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             indexer.IndexAsync(workspace.RootPath, indexProfile: IndexProfiles.Documentation));
 
-        Assert.Contains("Scoped indexing requires a compatible existing index state", exception.Message);
+        Assert.Contains("Scoped indexing found an existing index state with incompatible metadata", exception.Message);
+    }
+
+    [Fact]
+    public async Task IndexAsync_TargetScopedFirstRunAllowsMissingState()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var apiFile = workspace.WriteFile("Api/Program.cs", "api");
+        var webFile = workspace.WriteFile("Web/Program.cs", "web");
+        var stateStore = new FakeStateStore(EmptyState(workspace.RootPath));
+        var analyzer = new FakeAnalyzer();
+        var vectorStore = new FakeVectorStore();
+        var indexer = CreateIndexer(workspace.RootPath, stateStore, vectorStore, analyzer);
+
+        var result = await indexer.IndexAsync(Path.Combine(workspace.RootPath, "Api"));
+
+        Assert.False(result.FullReindex);
+        Assert.False(vectorStore.WorkspaceDeleted);
+        Assert.Equal(1, result.FilesScanned);
+        Assert.Contains(Path.GetFullPath(apiFile), analyzer.AnalyzedFiles);
+        Assert.DoesNotContain(Path.GetFullPath(webFile), analyzer.AnalyzedFiles);
+        Assert.Contains(Path.GetFullPath(apiFile), stateStore.SavedState!.Files.Keys);
+        Assert.DoesNotContain(Path.GetFullPath(webFile), stateStore.SavedState.Files.Keys);
     }
 
     [Fact]
@@ -639,6 +661,15 @@ public sealed class WorkspaceIndexerTests
             schemaVersion,
             DateTimeOffset.UtcNow,
             StateExists: true);
+
+    private static WorkspaceIndexState EmptyState(string workspaceRoot)
+        => new(
+            Path.GetFullPath(workspaceRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase),
+            EmbeddingModel: null,
+            SchemaVersion: null,
+            SavedAtUtc: null,
+            StateExists: false);
 
     private static IndexedFileState FileState(string filePath, string? fingerprint = null, int chunkCount = 1)
     {

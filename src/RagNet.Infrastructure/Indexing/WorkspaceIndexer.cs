@@ -501,7 +501,7 @@ public sealed class WorkspaceIndexer(
 
         Report(progress, workspaceRoot, IndexingProgressStage.ComparingState, 0, null, "Comparing with previous index state.");
         var previousState = await indexStateStore.LoadAsync(workspaceRoot, cancellationToken);
-        var stateCompatible = IsStateCompatible(previousState, embeddingModel);
+        var stateCompatible = !previousState.StateExists || IsStateCompatible(previousState, embeddingModel);
         var profileScoped = indexProfile != IndexProfiles.All;
         var targetScoped = !targetPlan.IsFullWorkspace;
         var mergeScopedState = profileScoped || targetScoped;
@@ -525,10 +525,10 @@ public sealed class WorkspaceIndexer(
         {
             if (!allowIncompatibleScopedState)
             {
-                throw new InvalidOperationException("Scoped indexing requires a compatible existing index state. Run a full workspace reindex first.");
+                throw new InvalidOperationException("Scoped indexing found an existing index state with incompatible metadata. Run a full workspace reindex first.");
             }
 
-            warnings.Add("Scoped indexing would require a compatible existing index state. Run a full workspace reindex before applying this scoped index.");
+            warnings.Add("Scoped indexing found an existing index state with incompatible metadata. Run a full workspace reindex before applying this scoped index.");
             previousState = EmptyState(workspaceRoot);
         }
 
