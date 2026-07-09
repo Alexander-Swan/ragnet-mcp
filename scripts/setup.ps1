@@ -334,6 +334,25 @@ function Pull-OllamaModels {
         ForEach-Object { Pull-OllamaModel -Model $_ -UseContainer $UseContainer }
 }
 
+function Publish-Indexer {
+    Invoke-Native { dotnet restore .\RagNet.Mcp.sln }
+    Invoke-Native { dotnet publish .\src\RagNet.Indexer\RagNet.Indexer.csproj `
+        -c Release `
+        -r win-x64 `
+        --self-contained true `
+        /p:PublishSingleFile=true `
+        -o $BinPath }
+}
+
+function Publish-NativeServer {
+    Invoke-Native { dotnet publish .\src\RagNet.Mcp\RagNet.Mcp.csproj `
+        -c Release `
+        -r win-x64 `
+        --self-contained true `
+        /p:PublishSingleFile=true `
+        -o $BinPath }
+}
+
 function Use-OllamaContainer {
     if ($OllamaMode -eq "Local") {
         if (-not (Test-PortInUse 11434)) {
@@ -388,6 +407,8 @@ $healthEndpoint = "http://localhost:$McpPort/health"
 Push-Location $RepoRoot
 try {
     if ($Mode -eq "Docker") {
+        Require-Command "dotnet"
+
         if ($OllamaMode -eq "Local") {
             throw "Docker mode requires the containerized Ollama service from docker-compose.yml. Use Hybrid or Native mode with -OllamaMode Local."
         }
@@ -403,6 +424,8 @@ try {
         if (-not $SkipModelPull) {
             Pull-OllamaModels -UseContainer $true
         }
+
+        Publish-Indexer
     }
     elseif ($Mode -eq "Hybrid") {
         Require-Command "dotnet"
@@ -430,13 +453,7 @@ try {
         Pull-OllamaModels -UseContainer $useOllamaContainer
         Invoke-Compose up -d --build --no-deps ragnet-mcp
 
-        Invoke-Native { dotnet restore .\RagNet.Mcp.sln }
-        Invoke-Native { dotnet publish .\src\RagNet.Indexer\RagNet.Indexer.csproj `
-            -c Release `
-            -r win-x64 `
-            --self-contained true `
-            /p:PublishSingleFile=true `
-            -o $BinPath }
+        Publish-Indexer
     }
     else {
         Require-Command "dotnet"
@@ -448,19 +465,8 @@ try {
             Pull-OllamaModels -UseContainer $false
         }
 
-        Invoke-Native { dotnet restore .\RagNet.Mcp.sln }
-        Invoke-Native { dotnet publish .\src\RagNet.Indexer\RagNet.Indexer.csproj `
-            -c Release `
-            -r win-x64 `
-            --self-contained true `
-            /p:PublishSingleFile=true `
-            -o $BinPath }
-        Invoke-Native { dotnet publish .\src\RagNet.Mcp\RagNet.Mcp.csproj `
-            -c Release `
-            -r win-x64 `
-            --self-contained true `
-            /p:PublishSingleFile=true `
-            -o $BinPath }
+        Publish-Indexer
+        Publish-NativeServer
     }
 
     if ($RegisterClients -ne "Skip") {
@@ -477,6 +483,10 @@ try {
     Write-Host "MCP endpoint: $mcpEndpoint"
     Write-Host "Health:       $healthEndpoint"
     if ($Mode -eq "Hybrid") {
+        Write-Host "Server:       $ResolvedContainerRuntime container ragnet-mcp"
+        Write-Host "Indexer:      .\bin\ragnet-indexer.exe"
+    }
+    elseif ($Mode -eq "Docker") {
         Write-Host "Server:       $ResolvedContainerRuntime container ragnet-mcp"
         Write-Host "Indexer:      .\bin\ragnet-indexer.exe"
     }

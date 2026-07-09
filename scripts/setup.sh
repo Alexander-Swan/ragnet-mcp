@@ -489,6 +489,25 @@ pull_ollama_models() {
   done
 }
 
+publish_indexer() {
+  dotnet restore ./RagNet.Mcp.sln
+  dotnet publish ./src/RagNet.Indexer/RagNet.Indexer.csproj \
+    -c Release \
+    -r linux-x64 \
+    --self-contained true \
+    /p:PublishSingleFile=true \
+    -o "$BIN_DIR"
+}
+
+publish_native_server() {
+  dotnet publish ./src/RagNet.Mcp/RagNet.Mcp.csproj \
+    -c Release \
+    -r linux-x64 \
+    --self-contained true \
+    /p:PublishSingleFile=true \
+    -o "$BIN_DIR"
+}
+
 parse_args "${ARGS[@]}"
 
 if [[ "${SKIP_REGISTER:-}" == "1" || "${SKIP_REGISTER:-}" == "true" ]]; then
@@ -504,6 +523,7 @@ fi
 resolve_container_runtime
 
 if [[ "$MODE" == "Docker" ]]; then
+  require_command dotnet
   if [[ "$OLLAMA_MODE" == "Local" ]]; then
     fail "Docker mode requires the containerized Ollama service from docker-compose.yml. Use Hybrid or Native mode with OLLAMA_MODE=Local."
   fi
@@ -514,6 +534,7 @@ if [[ "$MODE" == "Docker" ]]; then
     "ragnet-mcp|false|$MCP_PORT"
   compose up -d --build
   pull_ollama_models true
+  publish_indexer
 elif [[ "$MODE" == "Hybrid" ]]; then
   require_command dotnet
   if use_ollama_container; then
@@ -534,13 +555,7 @@ elif [[ "$MODE" == "Hybrid" ]]; then
     pull_ollama_models false
   fi
   compose up -d --build --no-deps ragnet-mcp
-  dotnet restore ./RagNet.Mcp.sln
-  dotnet publish ./src/RagNet.Indexer/RagNet.Indexer.csproj \
-    -c Release \
-    -r linux-x64 \
-    --self-contained true \
-    /p:PublishSingleFile=true \
-    -o "$BIN_DIR"
+  publish_indexer
 else
   require_command dotnet
   if [[ "$OLLAMA_MODE" == "Docker" ]]; then
@@ -548,19 +563,8 @@ else
   else
     pull_ollama_models false
   fi
-  dotnet restore ./RagNet.Mcp.sln
-  dotnet publish ./src/RagNet.Indexer/RagNet.Indexer.csproj \
-    -c Release \
-    -r linux-x64 \
-    --self-contained true \
-    /p:PublishSingleFile=true \
-    -o "$BIN_DIR"
-  dotnet publish ./src/RagNet.Mcp/RagNet.Mcp.csproj \
-    -c Release \
-    -r linux-x64 \
-    --self-contained true \
-    /p:PublishSingleFile=true \
-    -o "$BIN_DIR"
+  publish_indexer
+  publish_native_server
 fi
 
 if [[ "$REGISTER_CLIENTS" == "RepoOnly" ]]; then
@@ -574,6 +578,9 @@ success "RagNet MCP setup complete."
 echo "MCP endpoint: http://localhost:${MCP_PORT}/ragnet-mcp"
 echo "Health:       http://localhost:${MCP_PORT}/health"
 if [[ "$MODE" == "Hybrid" ]]; then
+  echo "Server:       $RESOLVED_CONTAINER_RUNTIME container ragnet-mcp"
+  echo "Indexer:      ./bin/ragnet-indexer"
+elif [[ "$MODE" == "Docker" ]]; then
   echo "Server:       $RESOLVED_CONTAINER_RUNTIME container ragnet-mcp"
   echo "Indexer:      ./bin/ragnet-indexer"
 elif [[ "$MODE" == "Native" ]]; then
