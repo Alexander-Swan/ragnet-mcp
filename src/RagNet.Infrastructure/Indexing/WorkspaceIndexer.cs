@@ -10,6 +10,7 @@ using RagNet.Mcp.Configuration;
 using RagNet.Mcp.Embeddings;
 using RagNet.Mcp.Embeddings.Interfaces;
 using RagNet.Mcp.Indexing.Interfaces;
+using RagNet.Mcp.Source;
 using RagNet.Mcp.Source.Interfaces;
 using RagNet.Mcp.Storage;
 using RagNet.Mcp.Storage.Interfaces;
@@ -246,7 +247,17 @@ public sealed class WorkspaceIndexer(
             indexedAtUtc,
             analysis.FilesScanned,
             totalChunksIndexed,
-            analysis.FullReindex), cancellationToken);
+            analysis.FullReindex,
+            analysis.SourceIdentity.RepositoryRoot,
+            GetRelativePathOrNull(analysis.SourceIdentity.RepositoryRoot, workspaceRoot),
+            analysis.SourceIdentity.RemoteUrl,
+            analysis.SourceIdentity.Branch,
+            analysis.SourceIdentity.CommitSha,
+            targetPlan.IndexedTargets
+                .Select(target => GetRelativePathOrNull(analysis.SourceIdentity.RepositoryRoot, target))
+                .Where(relativePath => !string.IsNullOrWhiteSpace(relativePath))
+                .Select(relativePath => relativePath!)
+                .ToArray()), cancellationToken);
 
         Report(progress, workspaceRoot, IndexingProgressStage.Completed, embeddedChunks.Count, analysis.Chunks.Count, "Indexing completed.");
         return new IndexWorkspaceResult(
@@ -586,6 +597,7 @@ public sealed class WorkspaceIndexer(
             changedFiles,
             deletedFiles,
             chunks,
+            workspaceSourceIdentity,
             warnings,
             profileFiles.Length,
             fullReindex,
@@ -1469,6 +1481,25 @@ public sealed class WorkspaceIndexer(
             : fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
     }
 
+    private static string? GetRelativePathOrNull(string root, string path)
+    {
+        if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        var normalizedRoot = NormalizePath(root);
+        var normalizedPath = NormalizePath(path);
+        if (!IsPathUnderRoot(normalizedPath, normalizedRoot))
+        {
+            return null;
+        }
+
+        return Path.GetRelativePath(normalizedRoot, normalizedPath)
+            .Replace(Path.DirectorySeparatorChar, '/')
+            .Replace(Path.AltDirectorySeparatorChar, '/');
+    }
+
     private async Task<string> ResolveWorkspaceTargetPathAsync(string workspacePath, CancellationToken cancellationToken)
     {
         if (!IsWorkspaceNameAlias(workspacePath))
@@ -1592,6 +1623,7 @@ public sealed class WorkspaceIndexer(
         IReadOnlyList<string> ChangedFiles,
         IReadOnlyList<string> DeletedFiles,
         IReadOnlyList<CodeChunk> Chunks,
+        SourceIdentity SourceIdentity,
         List<string> Warnings,
         int FilesScanned,
         bool FullReindex,

@@ -46,6 +46,12 @@ public sealed class QdrantIndexedWorkspaceRegistry(
                             collection_name = record.CollectionName,
                             groups = record.Groups,
                             indexed_targets = record.IndexedTargets.Select(NormalizePath).ToArray(),
+                            repository_root = NormalizeNullablePath(record.RepositoryRoot),
+                            repository_relative_workspace_root = record.RepositoryRelativeWorkspaceRoot,
+                            remote_url = record.RemoteUrl,
+                            branch = record.Branch,
+                            commit_sha = record.CommitSha,
+                            indexed_target_relative_paths = record.IndexedTargetRelativePaths ?? [],
                             last_indexed_utc = record.LastIndexedUtc,
                             files_scanned = record.FilesScanned,
                             chunks_indexed = record.ChunksIndexed,
@@ -214,7 +220,13 @@ public sealed class QdrantIndexedWorkspaceRegistry(
             GetDateTimeOffset(payload, "last_indexed_utc"),
             GetInt32(payload, "files_scanned"),
             GetInt32(payload, "chunks_indexed"),
-            GetBool(payload, "full_reindex"));
+            GetBool(payload, "full_reindex"),
+            NullIfWhiteSpace(GetString(payload, "repository_root")),
+            NullIfWhiteSpace(GetString(payload, "repository_relative_workspace_root")),
+            NullIfWhiteSpace(GetString(payload, "remote_url")),
+            NullIfWhiteSpace(GetString(payload, "branch")),
+            NullIfWhiteSpace(GetString(payload, "commit_sha")),
+            GetStringArray(payload, "indexed_target_relative_paths"));
         return true;
     }
 
@@ -245,6 +257,12 @@ public sealed class QdrantIndexedWorkspaceRegistry(
         => element.TryGetProperty(name, out var value) && value.TryGetDateTimeOffset(out var result)
             ? result
             : DateTimeOffset.MinValue;
+
+    private static string? NullIfWhiteSpace(string value)
+        => string.IsNullOrWhiteSpace(value) ? null : value;
+
+    private static string? NormalizeNullablePath(string? path)
+        => string.IsNullOrWhiteSpace(path) ? null : NormalizePath(path);
 
     private static string CreatePointId(string workspaceId)
     {

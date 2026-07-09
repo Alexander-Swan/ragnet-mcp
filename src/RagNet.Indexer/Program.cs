@@ -33,11 +33,12 @@ var workspaceGroupRegistry = host.Services.GetRequiredService<IWorkspaceGroupReg
 var vectorStore = host.Services.GetRequiredService<IVectorStore>();
 var stateStore = host.Services.GetRequiredService<IWorkspaceIndexStateStore>();
 var searchEvaluationService = host.Services.GetRequiredService<ISearchEvaluationService>();
+var transferService = host.Services.GetRequiredService<IWorkspaceTransferService>();
 var ragNetOptions = host.Services.GetRequiredService<IOptions<RagNetOptions>>().Value;
 
 try
 {
-    return await RunAsync(indexer, workspaceRegistry, workspaceGroupRegistry, vectorStore, stateStore, searchEvaluationService, ragNetOptions, args);
+    return await RunAsync(indexer, workspaceRegistry, workspaceGroupRegistry, vectorStore, stateStore, searchEvaluationService, transferService, ragNetOptions, args);
 }
 catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
 {
@@ -115,6 +116,7 @@ static async Task<int> RunAsync(
     IVectorStore vectorStore,
     IWorkspaceIndexStateStore stateStore,
     ISearchEvaluationService searchEvaluationService,
+    IWorkspaceTransferService transferService,
     RagNetOptions ragNetOptions,
     string[] args)
 {
@@ -309,6 +311,88 @@ static async Task<int> RunAsync(
             }
         }
 
+        case "workspace":
+        {
+            var action = RequiredListTarget(args);
+            switch (action)
+            {
+                case "export":
+                {
+                    var output = Required(options, "output");
+                    Console.WriteLine(JsonSerializer.Serialize(await transferService.ExportWorkspaceAsync(
+                        GetWorkspaceCommandSubject(args, options, "workspace"),
+                        output), jsonOptions));
+                    return 0;
+                }
+
+                case "import":
+                {
+                    var input = GetString(options, "input") ??
+                        (args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal) && !IsHelp(args[2])
+                            ? args[2]
+                            : null) ??
+                        throw new ArgumentException("--input is required.");
+                    Console.WriteLine(JsonSerializer.Serialize(await transferService.ImportAsync(
+                        input,
+                        ParsePathMap(GetMany(options, "path-map")),
+                        GetString(options, "workspace-root"),
+                        expectedKind: "workspace"), jsonOptions));
+                    return 0;
+                }
+
+                case "migrate":
+                {
+                    Console.WriteLine(JsonSerializer.Serialize(await transferService.MigrateAsync(), jsonOptions));
+                    return 0;
+                }
+
+                case "collection":
+                case "collections":
+                {
+                    var collectionStatus = await transferService.ResolveCollectionsAsync(
+                        GetString(options, "workspace"),
+                        GetString(options, "group"),
+                        GetString(options, "path") ?? GetString(options, "file"),
+                        cancellationToken: default);
+                    Console.WriteLine(JsonSerializer.Serialize(collectionStatus, jsonOptions));
+                    return 0;
+                }
+
+                default:
+                    throw new ArgumentException("Workspace command must be one of: collection, export, import, migrate.");
+            }
+        }
+
+        case "group":
+        {
+            var action = RequiredListTarget(args);
+            switch (action)
+            {
+                case "export":
+                    Console.WriteLine(JsonSerializer.Serialize(await transferService.ExportGroupAsync(
+                        GetWorkspaceCommandSubject(args, options, "group"),
+                        Required(options, "output")), jsonOptions));
+                    return 0;
+
+                case "import":
+                {
+                    var input = GetString(options, "input") ??
+                        (args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal) && !IsHelp(args[2])
+                            ? args[2]
+                            : null) ??
+                        throw new ArgumentException("--input is required.");
+                    Console.WriteLine(JsonSerializer.Serialize(await transferService.ImportAsync(
+                        input,
+                        ParsePathMap(GetMany(options, "path-map")),
+                        expectedKind: "group"), jsonOptions));
+                    return 0;
+                }
+
+                default:
+                    throw new ArgumentException("Group command must be one of: export, import.");
+            }
+        }
+
         default:
             Console.Error.WriteLine($"Unknown command '{command}'.");
             WriteHelp();
@@ -328,6 +412,31 @@ static int GetOptionStart(string command, string[] args)
         return args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal)
             ? 3
             : 2;
+    }
+
+    if ((command == "workspace" || command == "group") &&
+        args.Length > 1 &&
+        !args[1].StartsWith("-", StringComparison.Ordinal) &&
+        !IsHelp(args[1]))
+    {
+        var action = args[1].Trim().ToLowerInvariant();
+        if (action is "export" &&
+            args.Length > 2 &&
+            !args[2].StartsWith("-", StringComparison.Ordinal) &&
+            !IsHelp(args[2]))
+        {
+            return 3;
+        }
+
+        if (action is "import" &&
+            args.Length > 2 &&
+            !args[2].StartsWith("-", StringComparison.Ordinal) &&
+            !IsHelp(args[2]))
+        {
+            return 3;
+        }
+
+        return 2;
     }
 
     if (command == "status" &&
@@ -355,6 +464,16 @@ static string GetDeleteSubject(string[] args, Dictionary<string, List<string>> o
     => GetCommandSubject(args, options, optionName);
 
 static string GetCommandSubject(string[] args, Dictionary<string, List<string>> options, string optionName)
+{
+    if (args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(args[2]))
+    {
+        return args[2];
+    }
+
+    return Required(options, optionName);
+}
+
+static string GetWorkspaceCommandSubject(string[] args, Dictionary<string, List<string>> options, string optionName)
 {
     if (args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(args[2]))
     {
@@ -454,6 +573,23 @@ static bool? GetNullableBool(Dictionary<string, List<string>> options, string na
 static bool GetBool(Dictionary<string, List<string>> options, string name)
     => options.ContainsKey(name) &&
         (options[name].Count == 0 || bool.Parse(options[name][^1]));
+
+static IReadOnlyDictionary<string, string> ParsePathMap(IReadOnlyList<string>? values)
+{
+    var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var value in values ?? [])
+    {
+        var separator = value.IndexOf('=', StringComparison.Ordinal);
+        if (separator <= 0 || separator == value.Length - 1)
+        {
+            throw new ArgumentException("--path-map values must use <exported-root>=<local-root>.");
+        }
+
+        map[value[..separator].Trim()] = value[(separator + 1)..].Trim();
+    }
+
+    return map;
+}
 
 static bool IsHelp(string value)
     => value is "-h" or "--help" or "help";
@@ -985,6 +1121,12 @@ static void WriteHelp()
       index       --group|-g <name> [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
       status      --workspace <path>
       status      qdrant
+      workspace   collection [--workspace <path-or-name>|--group <name>|--path <file-or-directory>]
+      workspace   export <indexed-name-or-root> --output <directory>
+      workspace   import --input <directory> [--workspace-root <new-root>|--path-map <exported-root=new-root> ...]
+      workspace   migrate
+      group       export <name> --output <directory>
+      group       import --input <directory> --path-map <exported-root=new-root> [...]
       eval        --queries <eval.json> [--workspace-root <path>|--group <name>] [--limit <n>] [--hybrid] [--search-profile <profile>]
       profiles
       create      group <name> --workspace|-w <indexed-name-or-root> [--workspace|-w <indexed-name-or-root> ...] [--current|-c] [--add|-a]
@@ -1003,6 +1145,10 @@ static void WriteHelp()
       --dry-run       Preview files and chunks that would be indexed without writing vectors, state, registry, or local groups.
       --no-progress   Suppress progress output. Index/status/delete results are written to stdout.
       --queries       Search evaluation JSON file. Eval exits 0 when all queries pass and 2 when any query misses.
+      --output        Export directory for a RagNet Qdrant workspace/group export.
+      --input         Import directory containing ragnet-export-manifest.json.
+      --workspace-root New local root when importing a single exported workspace.
+      --path-map      Import remap from exported root to local root. Repeat for multi-workspace exports.
 
     Examples:
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln
@@ -1016,6 +1162,12 @@ static void WriteHelp()
       ragnet-indexer index --group my-product --force
       ragnet-indexer status --workspace D:\Work\Product\Api
       ragnet-indexer status qdrant
+      ragnet-indexer workspace collection --path D:\Work\Product\Api\Api.sln
+      ragnet-indexer workspace export Api --output D:\Backups\ragnet-api
+      ragnet-indexer group export my-product --output D:\Backups\ragnet-product
+      ragnet-indexer workspace import --input D:\Backups\ragnet-api --workspace-root E:\Repos\Product\Api
+      ragnet-indexer group import D:\Backups\ragnet-product --path-map D:\Work\Product=E:\Repos\Product
+      ragnet-indexer workspace migrate
       ragnet-indexer eval --queries eval.json --workspace-root D:\Work\Product\Api --limit 10 --hybrid
       ragnet-indexer profiles
       ragnet-indexer list groups

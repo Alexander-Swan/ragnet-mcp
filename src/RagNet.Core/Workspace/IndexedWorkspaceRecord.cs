@@ -9,4 +9,10 @@ public sealed record IndexedWorkspaceRecord(
     DateTimeOffset LastIndexedUtc,
     int FilesScanned,
     int ChunksIndexed,
-    bool FullReindex);
+    bool FullReindex,
+    string? RepositoryRoot = null,
+    string? RepositoryRelativeWorkspaceRoot = null,
+    string? RemoteUrl = null,
+    string? Branch = null,
+    string? CommitSha = null,
+    IReadOnlyList<string>? IndexedTargetRelativePaths = null);

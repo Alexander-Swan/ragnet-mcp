@@ -62,6 +62,12 @@ public static class RagNetServiceCollectionExtensions
             client.BaseAddress = new Uri(options.Qdrant.BaseUrl);
         });
 
+        services.AddHttpClient<QdrantWorkspaceTransferService>((serviceProvider, client) =>
+        {
+            var options = serviceProvider.GetRequiredService<IOptions<RagNetOptions>>().Value;
+            client.BaseAddress = new Uri(options.Qdrant.BaseUrl);
+        });
+
         services.AddSingleton(serviceProvider =>
         {
             var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
@@ -83,6 +89,7 @@ public static class RagNetServiceCollectionExtensions
         services.AddSingleton<IVectorStore>(serviceProvider => serviceProvider.GetRequiredService<QdrantVectorStore>());
         services.AddSingleton<IIndexedWorkspaceRegistry>(serviceProvider => serviceProvider.GetRequiredService<QdrantIndexedWorkspaceRegistry>());
         services.AddSingleton<IWorkspaceGroupRegistry>(serviceProvider => serviceProvider.GetRequiredService<QdrantWorkspaceGroupRegistry>());
+        services.AddSingleton<IWorkspaceTransferService>(serviceProvider => serviceProvider.GetRequiredService<QdrantWorkspaceTransferService>());
         services.AddSingleton<IWorkspaceIndexer, WorkspaceIndexer>();
         services.AddSingleton<ISearchEvaluationService, SearchEvaluationService>();
         services.AddSingleton<IIndexingJobQueue, InMemoryIndexingJobQueue>();
