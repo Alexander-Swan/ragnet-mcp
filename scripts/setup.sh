@@ -490,19 +490,22 @@ pull_ollama_models() {
 }
 
 publish_indexer() {
-  dotnet restore ./RagNet.Mcp.sln
+  dotnet restore ./src/RagNet.Indexer/RagNet.Indexer.csproj -r linux-x64
   dotnet publish ./src/RagNet.Indexer/RagNet.Indexer.csproj \
     -c Release \
     -r linux-x64 \
+    --no-restore \
     --self-contained true \
     /p:PublishSingleFile=true \
     -o "$BIN_DIR"
 }
 
 publish_native_server() {
+  dotnet restore ./src/RagNet.Mcp/RagNet.Mcp.csproj -r linux-x64
   dotnet publish ./src/RagNet.Mcp/RagNet.Mcp.csproj \
     -c Release \
     -r linux-x64 \
+    --no-restore \
     --self-contained true \
     /p:PublishSingleFile=true \
     -o "$BIN_DIR"

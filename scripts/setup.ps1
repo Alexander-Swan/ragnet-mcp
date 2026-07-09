@@ -335,19 +335,22 @@ function Pull-OllamaModels {
 }
 
 function Publish-Indexer {
-    Invoke-Native { dotnet restore .\RagNet.Mcp.sln }
+    Invoke-Native { dotnet restore .\src\RagNet.Indexer\RagNet.Indexer.csproj -r win-x64 }
     Invoke-Native { dotnet publish .\src\RagNet.Indexer\RagNet.Indexer.csproj `
         -c Release `
         -r win-x64 `
+        --no-restore `
         --self-contained true `
         /p:PublishSingleFile=true `
         -o $BinPath }
 }
 
 function Publish-NativeServer {
+    Invoke-Native { dotnet restore .\src\RagNet.Mcp\RagNet.Mcp.csproj -r win-x64 }
     Invoke-Native { dotnet publish .\src\RagNet.Mcp\RagNet.Mcp.csproj `
         -c Release `
         -r win-x64 `
+        --no-restore `
         --self-contained true `
         /p:PublishSingleFile=true `
         -o $BinPath }
