@@ -231,6 +231,62 @@ Individual registration scripts:
 
 GitHub Copilot CLI registration edits the config file directly. The default path is `%USERPROFILE%\.copilot\mcp.json`; set `COPILOT_MCP_CONFIG` or pass `-ConfigPath` to `register-copilot-cli.ps1` if your Copilot CLI build reads MCP servers from a different file.
 
+Manual registration uses the same streamable HTTP endpoint:
+
+`.mcp.json` for Visual Studio / GitHub Copilot app:
+
+```json
+{
+  "servers": [
+    {
+      "name": "ragnet-mcp",
+      "transport": "http",
+      "url": "http://localhost:7331/ragnet-mcp"
+    }
+  ]
+}
+```
+
+`.vscode/mcp.json` for VS Code / GitHub Copilot:
+
+```json
+{
+  "servers": {
+    "ragnet-mcp": {
+      "type": "http",
+      "url": "http://localhost:7331/ragnet-mcp"
+    }
+  }
+}
+```
+
+`%USERPROFILE%\.copilot\mcp.json` for GitHub Copilot CLI:
+
+```json
+{
+  "mcpServers": {
+    "ragnet-mcp": {
+      "type": "http",
+      "transport": "http",
+      "url": "http://localhost:7331/ragnet-mcp"
+    }
+  }
+}
+```
+
+`$HOME\.codex\config.toml` for Codex and Codex CLI:
+
+```toml
+[mcp_servers.ragnet-mcp]
+url = "http://localhost:7331/ragnet-mcp"
+```
+
+Claude Code user scope:
+
+```powershell
+claude mcp add --scope user --transport http ragnet-mcp http://localhost:7331/ragnet-mcp
+```
+
 Restart Visual Studio, VS Code, GitHub Copilot CLI, Codex, or Claude Code if the MCP server is not discovered immediately.
 
 ## Index A Workspace

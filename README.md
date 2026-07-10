@@ -430,6 +430,7 @@ Visual Studio / GitHub Copilot app registration is repo-local:
 ```
 
 This is written to `.mcp.json` and uses streamable HTTP.
+To register manually, create or update `.mcp.json` at the repository root with the JSON above.
 
 ## VS Code and GitHub Copilot
 
@@ -447,6 +448,7 @@ VS Code / GitHub Copilot app registration is repo-local:
 ```
 
 This is written to `.vscode/mcp.json`.
+To register manually, create or update `.vscode/mcp.json` with the JSON above.
 
 ## GitHub Copilot CLI
 
@@ -458,6 +460,19 @@ GitHub Copilot CLI registration is user-local and writes MCP config directly:
 
 The main registration script calls this automatically unless `-SkipCopilotCli` is passed.
 The default config path is `%USERPROFILE%\.copilot\mcp.json`; set `COPILOT_MCP_CONFIG` or pass `-ConfigPath` if your Copilot CLI build reads a different file.
+To register manually, create or update that JSON file:
+
+```json
+{
+  "mcpServers": {
+    "ragnet-mcp": {
+      "type": "http",
+      "transport": "http",
+      "url": "http://localhost:7331/ragnet-mcp"
+    }
+  }
+}
+```
 
 ## Codex and Codex CLI
 
@@ -474,6 +489,12 @@ codex mcp add ragnet-mcp --url http://localhost:7331/ragnet-mcp
 ```
 
 Codex stores the MCP server in `$HOME\.codex\config.toml`, which is shared by the Codex desktop app and Codex CLI. Restart Codex after registration if the server is not discovered immediately.
+To register manually, add this to `$HOME\.codex\config.toml`:
+
+```toml
+[mcp_servers.ragnet-mcp]
+url = "http://localhost:7331/ragnet-mcp"
+```
 
 ## Claude Code
 
@@ -490,6 +511,11 @@ claude mcp add --scope user --transport http ragnet-mcp http://localhost:7331/ra
 ```
 
 Use `-Scope local` or `-Scope project` when you want Claude Code registration scoped differently. Restart Claude Code after registration if the server is not discovered immediately.
+Manual Claude Code registration is the same command without the helper script:
+
+```powershell
+claude mcp add --scope user --transport http ragnet-mcp http://localhost:7331/ragnet-mcp
+```
 
 ## Setup Modes
 
