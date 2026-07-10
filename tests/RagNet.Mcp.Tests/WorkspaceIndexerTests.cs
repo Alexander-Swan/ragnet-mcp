@@ -849,6 +849,62 @@ public sealed class WorkspaceIndexerTests
         Assert.Contains(results, result => result.SymbolName == "SearchTests" && result.StartLine == 1 && result.EndLine == 8);
     }
 
+    [Fact]
+    public async Task GetCodeContextAsync_UsesIndexedChunksWhenFileIsNotReadableLocally()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var hostFile = @"C:\Product\Api\Program.cs";
+        var vectorStore = new FakeVectorStore();
+        vectorStore.IndexedChunks.Add(new CodeChunk(
+            "program:1:4",
+            workspace.RootPath,
+            hostFile,
+            "csharp",
+            "Program",
+            "File",
+            1,
+            4,
+            "var builder = WebApplication.CreateBuilder(args);\nvar app = builder.Build();\napp.MapGet(\"/\", () => \"ok\");\napp.Run();"));
+        var registry = new FakeIndexedWorkspaceRegistry();
+        registry.Records.Add(IndexedWorkspace(workspace.RootPath) with { CollectionName = "active-code-context" });
+        var indexer = CreateIndexer(workspace.RootPath, new FakeStateStore(State(workspace.RootPath)), vectorStore, new FakeAnalyzer(), registry);
+
+        var context = await indexer.GetCodeContextAsync(hostFile, line: 3, before: 1, after: 1);
+
+        Assert.Contains("    2: var app = builder.Build();", context);
+        Assert.Contains("    3: app.MapGet", context);
+        Assert.Contains("    4: app.Run();", context);
+        Assert.Equal("active-code-context", vectorStore.LastChunkLookupCollectionName);
+        Assert.Equal(hostFile, vectorStore.LastChunkLookupFilePath);
+    }
+
+    [Fact]
+    public async Task GetSymbolDetailsAsync_UsesIndexedChunksWhenFileIsNotReadableLocally()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var hostFile = @"C:\Product\Api\Controllers\OrdersController.cs";
+        var vectorStore = new FakeVectorStore();
+        vectorStore.IndexedChunks.Add(new CodeChunk(
+            "orders:10:20",
+            workspace.RootPath,
+            hostFile,
+            "csharp",
+            "GetOrders",
+            "Method",
+            10,
+            20,
+            "public IActionResult GetOrders() => Ok();"));
+        var registry = new FakeIndexedWorkspaceRegistry();
+        registry.Records.Add(IndexedWorkspace(workspace.RootPath) with { CollectionName = "active-symbol-details" });
+        var indexer = CreateIndexer(workspace.RootPath, new FakeStateStore(State(workspace.RootPath)), vectorStore, new FakeAnalyzer(), registry);
+
+        var details = await indexer.GetSymbolDetailsAsync(hostFile, "GetOrders");
+
+        Assert.Equal("public IActionResult GetOrders() => Ok();", details);
+        Assert.Equal("active-symbol-details", vectorStore.LastChunkLookupCollectionName);
+        Assert.Equal(hostFile, vectorStore.LastChunkLookupFilePath);
+    }
+
     private static WorkspaceIndexer CreateIndexer(
         string workspaceRoot,
         FakeStateStore stateStore,
@@ -1124,6 +1180,8 @@ public sealed class WorkspaceIndexerTests
 
         public IReadOnlyList<SearchResult> SearchResults { get; init; } = [];
 
+        public List<CodeChunk> IndexedChunks { get; } = [];
+
         public int LastSearchLimit { get; private set; }
 
         public bool LastSearchHybrid { get; private set; }
@@ -1133,6 +1191,10 @@ public sealed class WorkspaceIndexerTests
         public string? LastSearchContentType { get; private set; }
 
         public string? LastSearchIndexProfile { get; private set; }
+
+        public string? LastChunkLookupCollectionName { get; private set; }
+
+        public string? LastChunkLookupFilePath { get; private set; }
 
         public Task UpsertAsync(string workspaceRoot, IReadOnlyList<CodeChunk> chunks, IReadOnlyList<float[]> embeddings, CancellationToken cancellationToken = default)
             => UpsertAsync(workspaceRoot, workspaceRoot, chunks, embeddings, cancellationToken);
@@ -1196,6 +1258,35 @@ public sealed class WorkspaceIndexerTests
             LastSearchContentType = contentType;
             LastSearchIndexProfile = indexProfile;
             return Task.FromResult(SearchResults);
+        }
+
+        public Task<IReadOnlyList<CodeChunk>> GetChunksByFileAsync(
+            string workspaceRoot,
+            string collectionName,
+            string filePath,
+            CancellationToken cancellationToken = default)
+        {
+            LastChunkLookupCollectionName = collectionName;
+            LastChunkLookupFilePath = filePath;
+            var normalizedFilePath = NormalizePath(filePath);
+            return Task.FromResult<IReadOnlyList<CodeChunk>>(IndexedChunks
+                .Where(chunk => string.Equals(NormalizePath(chunk.FilePath), normalizedFilePath, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(chunk => chunk.StartLine)
+                .ToArray());
+        }
+
+        private static string NormalizePath(string path)
+        {
+            var trimmed = path.Trim();
+            if (trimmed.Length >= 3 &&
+                char.IsAsciiLetter(trimmed[0]) &&
+                trimmed[1] == ':' &&
+                (trimmed[2] == '\\' || trimmed[2] == '/'))
+            {
+                return trimmed.Replace('/', '\\').TrimEnd('\\');
+            }
+
+            return Path.GetFullPath(trimmed).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         }
 
     }

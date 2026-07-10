@@ -36,4 +36,10 @@ public interface IVectorStore
         string? contentType = null,
         string? indexProfile = null,
         CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<CodeChunk>> GetChunksByFileAsync(
+        string workspaceRoot,
+        string collectionName,
+        string filePath,
+        CancellationToken cancellationToken = default);
 }

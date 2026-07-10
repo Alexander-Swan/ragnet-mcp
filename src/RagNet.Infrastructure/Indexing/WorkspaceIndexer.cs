@@ -834,7 +834,13 @@ public sealed class WorkspaceIndexer(
         string workspacePath,
         CancellationToken cancellationToken = default)
     {
-        var workspace = await workspaceDetector.DetectAsync(workspacePath, cancellationToken);
+        var workspace = (await workspaceScopeResolver.ResolveAsync(
+            workspacePath,
+            scope: null,
+            workspaceRoot: null,
+            workspaceGroup: null,
+            includeGroupedWorkspaces: false,
+            cancellationToken)).First();
         EnsureAllowedWorkspaceRoot(workspace.RootPath);
         var workspaceRoot = NormalizePath(workspace.RootPath);
         var state = await indexStateStore.LoadAsync(workspaceRoot, cancellationToken);
@@ -926,30 +932,47 @@ public sealed class WorkspaceIndexer(
 
     public async Task<string> GetCodeContextAsync(string filePath, int line, int before, int after, CancellationToken cancellationToken = default)
     {
-        var fullPath = Path.GetFullPath(filePath);
-        EnsureAllowedPath(fullPath);
-        var lines = await File.ReadAllLinesAsync(fullPath, cancellationToken);
-        var start = Math.Max(1, line - Math.Max(0, before));
-        var end = Math.Min(lines.Length, line + Math.Max(0, after));
+        if (TryGetReadableLocalPath(filePath, out var fullPath))
+        {
+            EnsureAllowedPath(fullPath);
+            var lines = await File.ReadAllLinesAsync(fullPath, cancellationToken);
+            var start = Math.Max(1, line - Math.Max(0, before));
+            var end = Math.Min(lines.Length, line + Math.Max(0, after));
 
-        return string.Join(Environment.NewLine, Enumerable.Range(start, end - start + 1)
-            .Select(number => $"{number,5}: {lines[number - 1]}"));
+            return string.Join(Environment.NewLine, Enumerable.Range(start, end - start + 1)
+                .Select(number => $"{number,5}: {lines[number - 1]}"));
+        }
+
+        var indexedChunks = await GetIndexedChunksByFileAsync(filePath, cancellationToken);
+        if (indexedChunks.Count == 0)
+        {
+            throw new FileNotFoundException(
+                $"File '{filePath}' is not readable by this RagNet MCP process, and no indexed chunks were found for it. In Hybrid Docker mode, index host paths with the local ragnet-indexer executable first.",
+                filePath);
+        }
+
+        return FormatIndexedCodeContext(indexedChunks, line, before, after, filePath);
     }
 
     public async Task<string?> GetSymbolDetailsAsync(string filePath, string symbolName, CancellationToken cancellationToken = default)
     {
-        var workspace = await workspaceDetector.DetectAsync(filePath, cancellationToken);
-        EnsureAllowedWorkspaceRoot(workspace.RootPath);
-        EnsureAllowedPath(filePath);
-        var fullPath = Path.GetFullPath(filePath);
-        var analyzer = await SelectAnalyzerAsync(workspace.RootPath, fullPath, cancellationToken);
-        if (analyzer is null)
+        if (TryGetReadableLocalPath(filePath, out var fullPath))
         {
-            return null;
+            var workspace = await workspaceDetector.DetectAsync(fullPath, cancellationToken);
+            EnsureAllowedWorkspaceRoot(workspace.RootPath);
+            EnsureAllowedPath(fullPath);
+            var analyzer = await SelectAnalyzerAsync(workspace.RootPath, fullPath, cancellationToken);
+            if (analyzer is null)
+            {
+                return null;
+            }
+
+            var chunks = await analyzer.AnalyzeAsync(workspace.RootPath, fullPath, cancellationToken);
+            return chunks.FirstOrDefault(chunk => string.Equals(chunk.SymbolName, symbolName, StringComparison.OrdinalIgnoreCase))?.Content;
         }
 
-        var chunks = await analyzer.AnalyzeAsync(workspace.RootPath, fullPath, cancellationToken);
-        return chunks.FirstOrDefault(chunk => string.Equals(chunk.SymbolName, symbolName, StringComparison.OrdinalIgnoreCase))?.Content;
+        var indexedChunks = await GetIndexedChunksByFileAsync(filePath, cancellationToken);
+        return indexedChunks.FirstOrDefault(chunk => string.Equals(chunk.SymbolName, symbolName, StringComparison.OrdinalIgnoreCase))?.Content;
     }
 
     private IEnumerable<string> EnumerateFiles(string rootPath, string scanRootPath, IReadOnlyList<string>? excludeDirectories)
@@ -1556,15 +1579,103 @@ public sealed class WorkspaceIndexer(
 
     private static bool IsPathUnderRoot(string path, string root)
         => string.Equals(path, root, StringComparison.OrdinalIgnoreCase) ||
-            path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+            path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(root + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase);
 
     private static string NormalizePath(string path)
     {
-        var fullPath = Path.GetFullPath(path);
+        var trimmed = path.Trim();
+        if (IsWindowsFullyQualifiedPath(trimmed))
+        {
+            return trimmed.Replace('/', '\\').TrimEnd('\\');
+        }
+
+        var fullPath = Path.GetFullPath(trimmed);
         var root = Path.GetPathRoot(fullPath);
         return fullPath.Length == root?.Length
             ? fullPath
             : fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    private static bool IsWindowsFullyQualifiedPath(string path)
+        => path.Length >= 3 &&
+            char.IsAsciiLetter(path[0]) &&
+            path[1] == ':' &&
+            (path[2] == '\\' || path[2] == '/');
+
+    private static bool TryGetReadableLocalPath(string filePath, out string fullPath)
+    {
+        fullPath = string.Empty;
+        if (!OperatingSystem.IsWindows() && IsWindowsFullyQualifiedPath(filePath.Trim()))
+        {
+            return false;
+        }
+
+        try
+        {
+            fullPath = NormalizePath(filePath);
+            return File.Exists(fullPath);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            fullPath = string.Empty;
+            return false;
+        }
+    }
+
+    private async Task<IReadOnlyList<CodeChunk>> GetIndexedChunksByFileAsync(
+        string filePath,
+        CancellationToken cancellationToken)
+    {
+        var workspace = (await workspaceScopeResolver.ResolveAsync(
+            filePath,
+            scope: null,
+            workspaceRoot: null,
+            workspaceGroup: null,
+            includeGroupedWorkspaces: false,
+            cancellationToken)).First();
+        EnsureAllowedWorkspaceRoot(workspace.RootPath);
+        var collectionName = await ResolveActiveCollectionNameAsync(workspace.RootPath, cancellationToken);
+        return await vectorStore.GetChunksByFileAsync(workspace.RootPath, collectionName, filePath, cancellationToken);
+    }
+
+    private static string FormatIndexedCodeContext(
+        IReadOnlyList<CodeChunk> chunks,
+        int line,
+        int before,
+        int after,
+        string filePath)
+    {
+        var start = Math.Max(1, line - Math.Max(0, before));
+        var end = line + Math.Max(0, after);
+        var lines = new SortedDictionary<int, string>();
+
+        foreach (var chunk in chunks.OrderBy(chunk => chunk.StartLine).ThenBy(chunk => chunk.EndLine))
+        {
+            if (chunk.EndLine < start || chunk.StartLine > end)
+            {
+                continue;
+            }
+
+            var chunkLines = chunk.Content.ReplaceLineEndings("\n").Split('\n');
+            for (var index = 0; index < chunkLines.Length; index++)
+            {
+                var lineNumber = chunk.StartLine + index;
+                if (lineNumber >= start && lineNumber <= end)
+                {
+                    lines[lineNumber] = chunkLines[index];
+                }
+            }
+        }
+
+        if (lines.Count == 0)
+        {
+            throw new InvalidOperationException($"Indexed chunks for '{filePath}' do not cover requested line {line}.");
+        }
+
+        return string.Join(Environment.NewLine, lines.Select(pair => $"{pair.Key,5}: {pair.Value}"));
     }
 
     private static string? GetRelativePathOrNull(string root, string path)

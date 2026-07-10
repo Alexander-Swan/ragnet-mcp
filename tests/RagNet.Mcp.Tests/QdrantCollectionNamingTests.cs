@@ -38,4 +38,22 @@ public sealed class QdrantCollectionNamingTests
 
         Assert.StartsWith("ragnet-", collectionName);
     }
+
+    [Fact]
+    public void NormalizeWorkspaceRoot_PreservesWindowsHostPathOnNonWindowsHosts()
+    {
+        var normalized = QdrantCollectionNaming.NormalizeWorkspaceRoot(@"C:/Product/Api/");
+
+        Assert.Equal(@"C:\Product\Api", normalized);
+        Assert.DoesNotContain("/app", normalized);
+    }
+
+    [Fact]
+    public void GetWorkspaceId_TreatsWindowsHostPathCaseInsensitively()
+    {
+        var first = QdrantCollectionNaming.GetWorkspaceId(@"C:\Product\Api");
+        var second = QdrantCollectionNaming.GetWorkspaceId(@"c:/product/api/");
+
+        Assert.Equal(first, second);
+    }
 }

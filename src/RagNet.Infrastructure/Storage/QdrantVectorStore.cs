@@ -236,6 +236,77 @@ public sealed class QdrantVectorStore(
             .ToArray();
     }
 
+    public async Task<IReadOnlyList<CodeChunk>> GetChunksByFileAsync(
+        string workspaceRoot,
+        string collectionName,
+        string filePath,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await CollectionExistsAsync(collectionName, cancellationToken))
+        {
+            return [];
+        }
+
+        var chunks = new List<CodeChunk>();
+        object? offset = null;
+        do
+        {
+            var request = new Dictionary<string, object?>
+            {
+                ["limit"] = 256,
+                ["with_payload"] = true,
+                ["with_vector"] = false,
+                ["filter"] = new
+                {
+                    must = new object[]
+                    {
+                        MatchKeyword("workspace_id", QdrantCollectionNaming.GetWorkspaceId(workspaceRoot)),
+                        MatchKeyword("file_path", NormalizePath(filePath))
+                    }
+                }
+            };
+            if (offset is not null)
+            {
+                request["offset"] = offset;
+            }
+
+            var response = await _httpClient.PostAsJsonAsync(
+                $"collections/{Uri.EscapeDataString(collectionName)}/points/scroll",
+                request,
+                JsonOptions,
+                cancellationToken);
+
+            await EnsureSuccessAsync(response, $"scroll Qdrant collection '{collectionName}' for file chunks", cancellationToken);
+
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            if (!document.RootElement.TryGetProperty("result", out var result))
+            {
+                return chunks;
+            }
+
+            if (result.TryGetProperty("points", out var points) && points.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var point in points.EnumerateArray())
+                {
+                    var chunk = ToCodeChunk(point, workspaceRoot);
+                    if (chunk is not null)
+                    {
+                        chunks.Add(chunk);
+                    }
+                }
+            }
+
+            offset = ReadNextPageOffset(result);
+        }
+        while (offset is not null);
+
+        return chunks
+            .OrderBy(chunk => chunk.StartLine)
+            .ThenBy(chunk => chunk.EndLine)
+            .ToArray();
+    }
+
     private async Task EnsureCollectionAsync(string collectionName, int vectorSize, CancellationToken cancellationToken)
     {
         var response = await _httpClient.GetAsync($"collections/{Uri.EscapeDataString(collectionName)}", cancellationToken);
@@ -372,6 +443,59 @@ public sealed class QdrantVectorStore(
         };
     }
 
+    private static CodeChunk? ToCodeChunk(JsonElement point, string fallbackWorkspaceRoot)
+    {
+        if (!point.TryGetProperty("payload", out var payload))
+        {
+            return null;
+        }
+
+        IndexSchemaVersions.EnsureCompatible(
+            IndexSchemaVersions.ReadPayloadVersion(payload),
+            $"Qdrant vector payload for '{GetString(payload, "file_path")}'");
+
+        var filePath = GetString(payload, "file_path");
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            return null;
+        }
+
+        var workspaceRoot = GetString(payload, "workspace_root");
+        var content = GetString(payload, "content");
+        var contentType = GetString(payload, "content_type");
+        var indexProfile = GetString(payload, "index_profile");
+        return new CodeChunk(
+            Id: GetString(point, "id"),
+            WorkspaceRoot: string.IsNullOrWhiteSpace(workspaceRoot) ? fallbackWorkspaceRoot : workspaceRoot,
+            FilePath: filePath,
+            Language: GetString(payload, "language"),
+            SymbolName: GetString(payload, "symbol_name"),
+            SymbolKind: GetString(payload, "symbol_kind"),
+            StartLine: GetInt32(payload, "start_line"),
+            EndLine: GetInt32(payload, "end_line"),
+            Content: content)
+        {
+            ContentType = string.IsNullOrWhiteSpace(contentType) ? IndexedContentTypes.Code : contentType,
+            IndexProfile = string.IsNullOrWhiteSpace(indexProfile) ? IndexProfiles.Code : indexProfile
+        };
+    }
+
+    private static object? ReadNextPageOffset(JsonElement result)
+    {
+        if (!result.TryGetProperty("next_page_offset", out var nextOffset) ||
+            nextOffset.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        return nextOffset.ValueKind switch
+        {
+            JsonValueKind.String => nextOffset.GetString(),
+            JsonValueKind.Number when nextOffset.TryGetInt64(out var number) => number,
+            _ => JsonSerializer.Deserialize<object>(nextOffset.GetRawText(), JsonOptions)
+        };
+    }
+
     private static string GetString(JsonElement element, string name)
         => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() ?? string.Empty
@@ -454,12 +578,24 @@ public sealed class QdrantVectorStore(
 
     private static string NormalizePath(string path)
     {
-        var fullPath = Path.GetFullPath(path);
+        var trimmed = path.Trim();
+        if (IsWindowsFullyQualifiedPath(trimmed))
+        {
+            return trimmed.Replace('/', '\\').TrimEnd('\\');
+        }
+
+        var fullPath = Path.GetFullPath(trimmed);
         var root = Path.GetPathRoot(fullPath);
         return fullPath.Length == root?.Length
             ? fullPath
             : fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
     }
+
+    private static bool IsWindowsFullyQualifiedPath(string path)
+        => path.Length >= 3 &&
+            char.IsAsciiLetter(path[0]) &&
+            path[1] == ':' &&
+            (path[2] == '\\' || path[2] == '/');
 
     private static async Task EnsureSuccessAsync(HttpResponseMessage response, string action, CancellationToken cancellationToken)
     {
@@ -507,7 +643,7 @@ internal static partial class QdrantCollectionNaming
     public static string GetWorkspaceId(string workspaceRoot)
     {
         var normalized = NormalizeWorkspaceRoot(workspaceRoot);
-        var identity = OperatingSystem.IsWindows()
+        var identity = OperatingSystem.IsWindows() || IsWindowsFullyQualifiedPath(normalized)
             ? normalized.ToUpperInvariant()
             : normalized;
 
@@ -517,7 +653,13 @@ internal static partial class QdrantCollectionNaming
 
     public static string NormalizeWorkspaceRoot(string workspaceRoot)
     {
-        var fullPath = Path.GetFullPath(workspaceRoot);
+        var trimmed = workspaceRoot.Trim();
+        if (IsWindowsFullyQualifiedPath(trimmed))
+        {
+            return trimmed.Replace('/', '\\').TrimEnd('\\');
+        }
+
+        var fullPath = Path.GetFullPath(trimmed);
         var root = Path.GetPathRoot(fullPath);
         return fullPath.Length == root?.Length
             ? fullPath
@@ -532,4 +674,10 @@ internal static partial class QdrantCollectionNaming
 
     [GeneratedRegex("[^a-zA-Z0-9_.-]+", RegexOptions.CultureInvariant)]
     private static partial Regex UnsafeCollectionCharactersRegex();
+
+    private static bool IsWindowsFullyQualifiedPath(string path)
+        => path.Length >= 3 &&
+            char.IsAsciiLetter(path[0]) &&
+            path[1] == ':' &&
+            (path[2] == '\\' || path[2] == '/');
 }

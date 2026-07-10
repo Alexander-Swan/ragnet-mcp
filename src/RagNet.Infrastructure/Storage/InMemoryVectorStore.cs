@@ -114,6 +114,29 @@ public sealed class InMemoryVectorStore : IVectorStore
         return Task.FromResult<IReadOnlyList<SearchResult>>(results);
     }
 
+    public Task<IReadOnlyList<CodeChunk>> GetChunksByFileAsync(
+        string workspaceRoot,
+        string collectionName,
+        string filePath,
+        CancellationToken cancellationToken = default)
+    {
+        List<Entry> entries;
+        lock (_gate)
+        {
+            entries = _entriesByWorkspace.GetValueOrDefault(collectionName)?.ToList() ?? [];
+        }
+
+        var normalizedFilePath = NormalizePath(filePath);
+        var chunks = entries
+            .Select(entry => entry.Chunk)
+            .Where(chunk => string.Equals(NormalizePath(chunk.FilePath), normalizedFilePath, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(chunk => chunk.StartLine)
+            .ThenBy(chunk => chunk.EndLine)
+            .ToArray();
+
+        return Task.FromResult<IReadOnlyList<CodeChunk>>(chunks);
+    }
+
     private static SearchResult ToSearchResult(CodeChunk chunk, double score)
     {
         var preview = chunk.Content.Length > 400
@@ -143,7 +166,25 @@ public sealed class InMemoryVectorStore : IVectorStore
         => IndexProfiles.NormalizeFilter(indexProfile);
 
     private static string NormalizePath(string path)
-        => Path.GetFullPath(path);
+    {
+        var trimmed = path.Trim();
+        if (IsWindowsFullyQualifiedPath(trimmed))
+        {
+            return trimmed.Replace('/', '\\').TrimEnd('\\');
+        }
+
+        var fullPath = Path.GetFullPath(trimmed);
+        var root = Path.GetPathRoot(fullPath);
+        return fullPath.Length == root?.Length
+            ? fullPath
+            : fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    private static bool IsWindowsFullyQualifiedPath(string path)
+        => path.Length >= 3 &&
+            char.IsAsciiLetter(path[0]) &&
+            path[1] == ':' &&
+            (path[2] == '\\' || path[2] == '/');
 
     private static double KeywordScore(string text, IReadOnlyList<string> tokens)
     {
