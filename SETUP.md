@@ -195,7 +195,7 @@ Setup registers `ragnet-mcp` where the relevant client is available:
 
 - Visual Studio / GitHub Copilot app: `.mcp.json`
 - VS Code / GitHub Copilot app: `.vscode/mcp.json`
-- GitHub Copilot CLI: user-local MCP config at `%USERPROFILE%\.copilot\mcp.json` by default
+- GitHub Copilot CLI: direct user-local MCP config editing at `%USERPROFILE%\.copilot\mcp.json` by default
 - Codex and Codex CLI: `$HOME\.codex\config.toml`
 - Claude Code: user-scope Claude MCP config
 
@@ -229,7 +229,7 @@ Individual registration scripts:
 .\scripts\register-claude.ps1
 ```
 
-Set `COPILOT_MCP_CONFIG` or pass `-ConfigPath` to `register-copilot-cli.ps1` if your Copilot CLI build reads MCP servers from a different file.
+GitHub Copilot CLI registration edits the config file directly. The default path is `%USERPROFILE%\.copilot\mcp.json`; set `COPILOT_MCP_CONFIG` or pass `-ConfigPath` to `register-copilot-cli.ps1` if your Copilot CLI build reads MCP servers from a different file.
 
 Restart Visual Studio, VS Code, GitHub Copilot CLI, Codex, or Claude Code if the MCP server is not discovered immediately.
 

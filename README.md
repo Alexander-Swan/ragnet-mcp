@@ -144,11 +144,11 @@ Indexing and search support conservative profiles: `all`, `code`, `docs`, `metad
 
 After the first `index_workspace` run, RagNet stores content-hash file fingerprints in a Qdrant-backed index-state collection named `{CollectionPrefix}-index-state`. Later indexing runs compare the current file list with that state and only re-analyze/re-embed files that changed. Deleted files are removed from the vector store before the state is saved.
 
-The Qdrant state point also records the workspace root, embedding model, index/analyzer schema version, last saved timestamp, and indexed file metadata. If the configured embedding model or schema version changes, RagNet automatically clears the workspace vectors and performs a full reindex. You can force the same lifecycle manually by passing `force: true` to `index_workspace` or `index_workspace_group`. Profile-scoped indexing updates only files in that profile and requires a compatible existing all-profile state.
+The Qdrant state point also records the workspace root, embedding model, index/analyzer schema version, last saved timestamp, and indexed file metadata. If the configured embedding model or schema version changes, RagNet automatically performs a full reindex. You can force the same lifecycle manually by passing `force: true` to `index_workspace` or `index_workspace_group`. Profile-scoped indexing updates only files in that profile and requires a compatible existing all-profile state.
 
 Embedding creation is batched and parallelized during indexing. Configure concurrent batch count with `RagNet:Indexing:MaxEmbeddingConcurrency` and batch size with `RagNet:Indexing:MaxEmbeddingBatchSize`; defaults are `4` and `16`. Duplicate chunk content in the same indexing run is embedded once by chunk-content hash, then reused for matching chunks. Qdrant vector upserts are also chunked with `RagNet:Qdrant:UpsertBatchSize`, default `256`.
 
-Qdrant collections are named deterministically as `{CollectionPrefix}-{workspaceId}`, where `workspaceId` is derived from the normalized workspace root rather than the raw path. The default prefix is `ragnet`. A forced/full reindex deletes the workspace collection and recreates it with the current embedding vector size. To manually reset a workspace index, run `index_workspace` with `force: true`, or delete the matching collection from Qdrant and re-run indexing.
+Qdrant collections are named deterministically as `{CollectionPrefix}-{workspaceId}`, where `workspaceId` is derived from the normalized workspace root rather than the raw path. The default prefix is `ragnet`. A forced/full reindex stages vectors in a replacement collection and promotes it only after indexing succeeds, so active search can keep using the previous collection during the run. To manually reset a workspace index, run `index_workspace` with `force: true`, or delete the matching collection from Qdrant and re-run indexing.
 
 RagNet also maintains a Qdrant-backed workspace registry collection named `{CollectionPrefix}-workspace-registry`. Each successful indexing run records the workspace root, workspace id, vector collection name, configured workspace groups, indexed targets/scopes, source identity metadata when available, relative target paths, last indexed timestamp, files scanned, chunks indexed, and whether the run was a full reindex. Search scope `all_indexed_workspaces` reads this registry, so indexed workspaces survive MCP process restarts.
 
@@ -245,19 +245,16 @@ Example `eval.json`:
 
 Suite-level defaults can include `limit`, `hybrid`, `filePath`, `scope`, `workspaceRoot`, `workspaceGroup`, `contentType`, `retrievalMode`, and `searchProfile`. Each query can override those same fields. Expected filters are case-insensitive and can use `file`, `fileContains`, `symbol`, `symbolContains`, `contentContains`, `contentType`, and `indexProfile`.
 
-## Planned Architecture TODO
+## Remaining Architecture Work
 
-RagNet should support both local-only and hosted/team usage without forcing the same indexing mechanics into both modes:
+RagNet supports the default local shape of Docker-hosted MCP/search plus a host-local indexer, so normal Windows paths can be indexed locally and searched through the Docker MCP service. Remaining hosted/team work includes:
 
-- Keep the search/MCP portion web-based so multiple teammates and IDEs can query the same indexed product concurrently.
-- Split indexing into a reusable indexing pipeline plus a separate `RagNet.Indexer` executable/worker. Local mode should run this executable on the host so it can read local project files directly without mounting source folders into a container.
 - Cloud/team mode should run the same indexing pipeline in CI, a worker, or a webhook-triggered job that checks out the repository, performs incremental indexing, and writes vectors into shared Qdrant.
 - Prefer Git metadata when available: repository root, remote URL, branch, commit SHA, changed files, and deleted files. The system should still work without Git, but with reduced functionality based on filesystem scanning and content fingerprints.
 - Add Git-only support for indexing local uncommitted changes with clear separation from committed content. The committed baseline should be tagged with repository/branch/commit metadata, while working-tree and staged changes should be indexed as a local overlay tagged as uncommitted, machine-local, and branch-specific. Retrieval should be able to include, exclude, or prefer that overlay so an agent can distinguish checked-in code from local edits.
 - Add GitHub/GitLab/Azure DevOps-style change notifications later. Push/webhook events should enqueue incremental reindexing for affected repositories/workspaces instead of requiring a full scan every time.
 - Store enough source metadata in vector payloads for hosted search: repository URL, commit SHA, relative path, symbol details, line numbers, and chunk content. A cloud-hosted search service cannot read `D:\...` local files, so context must come from indexed payloads or a repo checkout/object store.
 - Keep full Docker indexing optional. Since `ragnet-mcp` runs in Docker by default, arbitrary host workspace paths should be indexed with the local indexer unless those paths are mounted or synced into the container.
-- Simplify indexing progress output. Progress lines should show only time, workspace, action, and current/total. Current values should be monotonic per action so users can see progress at a glance; they do not need to identify the exact embedding or chunk being processed.
 - Continue hardening setup for less common local environments and hosted/team deployment paths.
 
 See [HOSTED_INDEXING.md](HOSTED_INDEXING.md) for the hosted worker/job lifecycle design.
