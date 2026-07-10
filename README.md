@@ -138,6 +138,12 @@ Agents can use `trigger_indexing` as the generic indexing entry point. Pass `wor
 
 In the default Hybrid setup, `ragnet-mcp` runs in Docker. Use MCP indexing tools only for paths visible inside that container. For ordinary local host paths, use `bin\ragnet-indexer.exe`; it writes to the same Qdrant collections used by MCP search. After a Windows workspace has been indexed locally, Docker-hosted MCP search can still accept Windows `file_path` values for that indexed workspace because search resolves them through the Qdrant workspace registry instead of treating `C:\...` as a Linux path.
 
+If an agent tells you it needs to index a Windows host workspace in Hybrid mode, the command it should run from the host shell is:
+
+```powershell
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
+```
+
 Indexing and search support conservative profiles: `all`, `code`, `docs`, `metadata`, `frontend`, and `tests`. Use `index_profile` to update one profile at a time, and `search_profile` to constrain `search_code` or `hybrid_search` results. `all` is the default.
 
 ## Incremental Indexing

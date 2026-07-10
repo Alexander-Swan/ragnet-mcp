@@ -311,6 +311,8 @@ For normal local Windows paths like `D:\Work\Product\Api`, use the local indexer
 .\bin\ragnet-indexer.exe index -w "D:\Work\Product\Api\Api.sln" -w "D:\Work\Product\docs\api"
 ```
 
+When an agent asks to index a local Windows workspace in Hybrid mode, have it run the local `.\bin\ragnet-indexer.exe` command from the host shell. Do not use the MCP `trigger_indexing` or `index_workspace` tools for `D:\...` paths unless that path is mounted into the MCP container.
+
 After local indexing registers a Windows workspace in Qdrant, Docker-hosted MCP search can accept Windows `file_path` values for that indexed workspace. It resolves them through the workspace registry instead of trying to read `C:\...` inside the Linux container. MCP indexing still requires a container-visible path; use the local indexer for host-path indexing.
 
 Use `--current` or `-c` to index the current directory. Repeat `--workspace` to union multiple targets. Two solution files in the same repo index only those two solution graphs. If no target is provided and the current directory is inside an already indexed workspace, the CLI reindexes that workspace incrementally. Add `--group` to save that target set under a local group name for future runs:

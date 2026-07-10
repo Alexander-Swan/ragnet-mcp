@@ -146,6 +146,14 @@ Keep result packing token-aware. Avoid returning huge chunks that can exceed mod
 
 The MCP server should expose both search and indexing operations so an agent can trigger indexing without shell access.
 
+In Hybrid mode, do not use MCP indexing tools for ordinary Windows host paths such as `D:\Work\Product\Api`; the Docker-hosted MCP server cannot read those paths unless they are mounted or synced into the container. When the user asks an agent to index a local host workspace in Hybrid mode, run the local executable from the host shell instead:
+
+```powershell
+.\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api"
+```
+
+Use MCP indexing tools only for container-visible paths, such as `/workspace/Product/Api`, or for configured workspace groups that resolve to container-visible roots. MCP search can still accept indexed Windows `file_path` values because search resolves them through the Qdrant workspace registry.
+
 Current tool categories should include:
 
 - indexing trigger/status tools;
