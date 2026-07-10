@@ -151,7 +151,10 @@ public sealed class WorkspaceIndexerTests
             "git",
             IsAvailable: true,
             [Path.GetFullPath(changed)],
-            [Path.GetFullPath(removed)]));
+            [Path.GetFullPath(removed)])
+        {
+            IsComplete = true
+        });
         var stateStore = new FakeStateStore(State(
             workspace.RootPath,
             FileState(unchanged),
@@ -173,6 +176,38 @@ public sealed class WorkspaceIndexerTests
         Assert.Equal([Path.GetFullPath(removed), Path.GetFullPath(changed)], vectorStore.DeletedFiles);
         Assert.Contains(Path.GetFullPath(unchanged), stateStore.SavedState!.Files.Keys);
         Assert.DoesNotContain(Path.GetFullPath(removed), stateStore.SavedState.Files.Keys);
+        Assert.True(detector.WasCalled);
+    }
+
+    [Fact]
+    public async Task IndexAsync_IncompleteSourceChangeDetectorFallsBackToFingerprintComparison()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var changed = workspace.WriteFile("src/Changed.cs", "changed v2");
+        var unchanged = workspace.WriteFile("src/Unchanged.cs", "unchanged");
+        var detector = new FakeSourceChangeDetector(changeSet: new SourceChangeSet(
+            "git",
+            IsAvailable: true,
+            ChangedFiles: [],
+            DeletedFiles: []));
+        var stateStore = new FakeStateStore(State(
+            workspace.RootPath,
+            FileState(changed, fingerprint: "old-fingerprint"),
+            FileState(unchanged)));
+        var vectorStore = new FakeVectorStore();
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            stateStore,
+            vectorStore,
+            analyzer,
+            sourceChangeDetector: detector);
+
+        var result = await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal(2, result.FilesScanned);
+        Assert.Equal([Path.GetFullPath(changed)], analyzer.AnalyzedFiles);
+        Assert.Equal([Path.GetFullPath(changed)], vectorStore.DeletedFiles);
         Assert.True(detector.WasCalled);
     }
 

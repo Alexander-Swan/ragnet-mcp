@@ -650,7 +650,7 @@ public sealed class WorkspaceIndexer(
             profileFiles,
             previousScopedFiles.Select(file => file.FilePath).ToArray(),
             cancellationToken);
-        if (!changeSet.IsAvailable)
+        if (!changeSet.IsAvailable || !changeSet.IsComplete)
         {
             return FileScanPlan.Fallback(profileFiles);
         }
