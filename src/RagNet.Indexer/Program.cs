@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -137,7 +138,7 @@ static async Task<int> RunAsync(
     var options = ParseOptions(args.Skip(optionStart));
     var progress = GetBool(options, "no-progress")
         ? null
-        : new Progress<IndexingProgress>(WriteProgress);
+        : new Progress<IndexingProgress>(ProgressConsole.Write);
     var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
     {
         WriteIndented = true
@@ -1243,20 +1244,6 @@ static void WriteHelp()
     """);
 }
 
-static void WriteProgress(IndexingProgress progress)
-{
-    var count = progress.Total.HasValue
-        ? $"{progress.Current}/{progress.Total.Value}"
-        : $"{progress.Current}/-";
-    var workspaceName = Path.GetFileName(progress.WorkspaceRoot);
-    if (string.IsNullOrWhiteSpace(workspaceName))
-    {
-        workspaceName = progress.WorkspaceRoot;
-    }
-
-    Console.Error.WriteLine($"{DateTimeOffset.Now:HH:mm:ss} {workspaceName} {progress.Message} {count}");
-}
-
 sealed record LocalWorkspaceGroupStore(IReadOnlyList<LocalWorkspaceGroup> Groups);
 
 sealed record LocalWorkspaceGroup(string Name, IReadOnlyList<string> Roots);
@@ -1291,3 +1278,51 @@ sealed record QdrantStatusResult(
     IReadOnlyList<string> MatchingCollections);
 
 sealed record QdrantCollectionListItem(string Name);
+
+static class ProgressConsole
+{
+    private static readonly ConcurrentDictionary<string, int> Sequences = new(StringComparer.OrdinalIgnoreCase);
+
+    public static void Write(IndexingProgress progress)
+    {
+        var displayCurrent = GetDisplayCurrent(progress);
+        var count = progress.Total.HasValue
+            ? $"{displayCurrent}/{progress.Total.Value}"
+            : $"{displayCurrent}/-";
+        var workspaceName = Path.GetFileName(progress.WorkspaceRoot);
+        if (string.IsNullOrWhiteSpace(workspaceName))
+        {
+            workspaceName = progress.WorkspaceRoot;
+        }
+
+        Console.Error.WriteLine($"{DateTimeOffset.Now:HH:mm:ss} {workspaceName} {progress.Message} {count}");
+    }
+
+    private static int GetDisplayCurrent(IndexingProgress progress)
+    {
+        if (!progress.Total.HasValue || progress.Total.Value <= 0)
+        {
+            return progress.Current;
+        }
+
+        var total = progress.Total.Value;
+        var key = $"{progress.WorkspaceRoot}|{progress.Stage}|{progress.Message}|{total}";
+        if (progress.Current <= 0)
+        {
+            Sequences[key] = 0;
+            return 0;
+        }
+
+        var displayCurrent = Sequences.AddOrUpdate(
+            key,
+            _ => Math.Min(progress.Current, total),
+            (_, previous) => Math.Min(Math.Max(progress.Current, previous + 1), total));
+
+        if (displayCurrent >= total)
+        {
+            Sequences.TryRemove(key, out _);
+        }
+
+        return displayCurrent;
+    }
+}
