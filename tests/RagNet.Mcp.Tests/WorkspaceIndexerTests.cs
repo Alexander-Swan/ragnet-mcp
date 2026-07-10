@@ -141,6 +141,42 @@ public sealed class WorkspaceIndexerTests
     }
 
     [Fact]
+    public async Task IndexAsync_UsesSourceChangeDetectorWhenAvailable()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var unchanged = workspace.WriteFile("src/Unchanged.cs", "unchanged");
+        var changed = workspace.WriteFile("src/Changed.cs", "changed v2");
+        var removed = Path.Combine(workspace.RootPath, "src", "Removed.cs");
+        var detector = new FakeSourceChangeDetector(changeSet: new SourceChangeSet(
+            "git",
+            IsAvailable: true,
+            [Path.GetFullPath(changed)],
+            [Path.GetFullPath(removed)]));
+        var stateStore = new FakeStateStore(State(
+            workspace.RootPath,
+            FileState(unchanged),
+            FileState(changed, fingerprint: "old-fingerprint"),
+            new IndexedFileState(Path.GetFullPath(removed), "removed-fingerprint", 10, DateTimeOffset.UtcNow, ChunkCount: 1)));
+        var vectorStore = new FakeVectorStore();
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            stateStore,
+            vectorStore,
+            analyzer,
+            sourceChangeDetector: detector);
+
+        var result = await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal(1, result.FilesScanned);
+        Assert.Equal([Path.GetFullPath(changed)], analyzer.AnalyzedFiles);
+        Assert.Equal([Path.GetFullPath(removed), Path.GetFullPath(changed)], vectorStore.DeletedFiles);
+        Assert.Contains(Path.GetFullPath(unchanged), stateStore.SavedState!.Files.Keys);
+        Assert.DoesNotContain(Path.GetFullPath(removed), stateStore.SavedState.Files.Keys);
+        Assert.True(detector.WasCalled);
+    }
+
+    [Fact]
     public async Task IndexTargetsAsync_UnindexedBareWorkspaceNameRequiresFullPath()
     {
         using var workspace = new TemporaryWorkspace();
@@ -227,7 +263,7 @@ public sealed class WorkspaceIndexerTests
     {
         using var workspace = new TemporaryWorkspace();
         workspace.WriteFile("src/First.cs", "first");
-        var stateStore = new FakeStateStore(State(workspace.RootPath));
+        var stateStore = new FakeStateStore(EmptyState(workspace.RootPath));
         var embeddingProvider = new FakeEmbeddingProvider(
             modelResolution: new EmbeddingModelResolution(
                 "missing-model",
@@ -392,30 +428,77 @@ public sealed class WorkspaceIndexerTests
     }
 
     [Fact]
-    public async Task IndexAsync_IncompatibleAllProfileStateDeletesWorkspaceAndReindexesAllFiles()
+    public async Task IndexAsync_IncompatibleAllProfileStateRequiresExplicitSafePath()
     {
         using var workspace = new TemporaryWorkspace();
         var codeFile = workspace.WriteFile("src/Program.cs", "code");
-        var docsFile = workspace.WriteFile("docs/guide.md", "docs");
         var stateStore = new FakeStateStore(State(
             workspace.RootPath,
             schemaVersion: "old-schema",
-            FileState(codeFile),
-            FileState(docsFile)));
+            FileState(codeFile)));
         var vectorStore = new FakeVectorStore();
         var analyzer = new FakeAnalyzer();
         var indexer = CreateIndexer(workspace.RootPath, stateStore, vectorStore, analyzer);
 
-        var result = await indexer.IndexAsync(workspace.RootPath);
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => indexer.IndexAsync(workspace.RootPath));
+
+        Assert.Contains("will not delete or overwrite the active index automatically", exception.Message);
+        Assert.Contains("--force", exception.Message);
+        Assert.Contains("migrate", exception.Message);
+        Assert.False(vectorStore.WorkspaceDeleted);
+        Assert.Empty(vectorStore.UpsertedChunks);
+        Assert.Null(stateStore.SavedState);
+    }
+
+    [Fact]
+    public async Task IndexAsync_ForceFullReindexStagesReplacementAndPreservesActiveCollectionUntilPromotion()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var sourceFile = workspace.WriteFile("src/Program.cs", "code");
+        var activeCollection = "active-collection";
+        var registry = new FakeIndexedWorkspaceRegistry();
+        registry.Records.Add(IndexedWorkspace(workspace.RootPath) with { CollectionName = activeCollection });
+        var vectorStore = new FakeVectorStore();
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(State(workspace.RootPath, FileState(sourceFile, fingerprint: "old-fingerprint"))),
+            vectorStore,
+            analyzer,
+            registry);
+
+        var result = await indexer.IndexAsync(workspace.RootPath, force: true);
 
         Assert.True(result.FullReindex);
-        Assert.True(vectorStore.WorkspaceDeleted);
-        Assert.Equal(2, result.ChunksIndexed);
-        Assert.Equal(
-            new[] { Path.GetFullPath(codeFile), Path.GetFullPath(docsFile) }.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
-            analyzer.AnalyzedFiles.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
-            StringComparer.OrdinalIgnoreCase);
-        Assert.Equal(CurrentSchemaVersion, stateStore.SavedState!.SchemaVersion);
+        Assert.False(vectorStore.WorkspaceDeleted);
+        Assert.Empty(vectorStore.DeletedFiles);
+        Assert.Single(vectorStore.UpsertedChunks);
+        Assert.NotEqual(activeCollection, vectorStore.LastUpsertCollectionName);
+        Assert.Contains("-stage-", vectorStore.LastUpsertCollectionName, StringComparison.Ordinal);
+        Assert.Equal(vectorStore.LastUpsertCollectionName, registry.Records[^1].CollectionName);
+    }
+
+    [Fact]
+    public async Task IndexAsync_FailedFullReindexDoesNotPromoteStagingCollection()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var sourceFile = workspace.WriteFile("src/Program.cs", "code");
+        var activeCollection = "active-collection";
+        var registry = new FakeIndexedWorkspaceRegistry();
+        registry.Records.Add(IndexedWorkspace(workspace.RootPath) with { CollectionName = activeCollection });
+        var vectorStore = new FakeVectorStore { ThrowOnUpsert = true };
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(State(workspace.RootPath, FileState(sourceFile, fingerprint: "old-fingerprint"))),
+            vectorStore,
+            new FakeAnalyzer(),
+            registry);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => indexer.IndexAsync(workspace.RootPath, force: true));
+
+        Assert.False(vectorStore.WorkspaceDeleted);
+        Assert.Empty(vectorStore.DeletedFiles);
+        Assert.Equal(activeCollection, registry.Records[^1].CollectionName);
     }
 
     [Fact]
@@ -429,7 +512,7 @@ public sealed class WorkspaceIndexerTests
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             indexer.IndexAsync(workspace.RootPath, indexProfile: IndexProfiles.Documentation));
 
-        Assert.Contains("Scoped indexing found an existing index state with incompatible metadata", exception.Message);
+        Assert.Contains("will not delete or overwrite the active index automatically", exception.Message);
     }
 
     [Fact]
@@ -469,6 +552,113 @@ public sealed class WorkspaceIndexerTests
         Assert.Equal(1, result.FilesScanned);
         Assert.Contains(Path.GetFullPath(apiFile), analyzer.AnalyzedFiles);
         Assert.DoesNotContain(Path.GetFullPath(webFile), analyzer.AnalyzedFiles);
+    }
+
+    [Fact]
+    public async Task IndexAsync_UsesDefaultHeavyDirectoryExcludes()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var sourceFile = workspace.WriteFile("src/Program.cs", "source");
+        var excludedFiles = new[]
+        {
+            workspace.WriteFile(".agents/notes.md", "agents"),
+            workspace.WriteFile(".codex/session.md", "codex"),
+            workspace.WriteFile(".dotnet-home/state.md", "dotnet"),
+            workspace.WriteFile(".git/config.md", "git"),
+            workspace.WriteFile("artifacts/log.md", "artifacts"),
+            workspace.WriteFile("bin/Debug/Generated.cs", "bin"),
+            workspace.WriteFile("coverage/report.md", "coverage"),
+            workspace.WriteFile("dist/bundle.md", "dist"),
+            workspace.WriteFile("obj/Debug/Generated.cs", "obj"),
+            workspace.WriteFile("node_modules/pkg/index.md", "node"),
+            workspace.WriteFile("TestResults/result.md", "results")
+        };
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(workspace.RootPath, new FakeStateStore(State(workspace.RootPath)), new FakeVectorStore(), analyzer);
+
+        var result = await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal(1, result.FilesScanned);
+        Assert.Equal([Path.GetFullPath(sourceFile)], analyzer.AnalyzedFiles);
+        foreach (var excludedFile in excludedFiles)
+        {
+            Assert.DoesNotContain(Path.GetFullPath(excludedFile), analyzer.AnalyzedFiles);
+        }
+    }
+
+    [Fact]
+    public async Task IndexAsync_PreservesManualExcludeDirectories()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var sourceFile = workspace.WriteFile("src/Program.cs", "source");
+        var vendorFile = workspace.WriteFile("vendor/Generated.cs", "vendor");
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(workspace.RootPath, new FakeStateStore(State(workspace.RootPath)), new FakeVectorStore(), analyzer);
+
+        var result = await indexer.IndexAsync(workspace.RootPath, excludeDirectories: ["vendor"]);
+
+        Assert.Equal(1, result.FilesScanned);
+        Assert.Contains(Path.GetFullPath(sourceFile), analyzer.AnalyzedFiles);
+        Assert.DoesNotContain(Path.GetFullPath(vendorFile), analyzer.AnalyzedFiles);
+    }
+
+    [Fact]
+    public async Task IndexAsync_ConfiguredExcludeDirectoriesReplaceDefaults()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var sourceFile = workspace.WriteFile("src/Program.cs", "source");
+        var binFile = workspace.WriteFile("bin/Debug/Generated.cs", "bin");
+        var generatedFile = workspace.WriteFile("generated/Generated.cs", "generated");
+        var analyzer = new FakeAnalyzer();
+        var options = new RagNetOptions
+        {
+            Workspace = new WorkspaceOptions
+            {
+                ExcludeDirectories = ["generated"]
+            }
+        };
+        var indexer = CreateIndexer(workspace.RootPath, new FakeStateStore(State(workspace.RootPath)), new FakeVectorStore(), analyzer, options: options);
+
+        var result = await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal(2, result.FilesScanned);
+        Assert.Contains(Path.GetFullPath(sourceFile), analyzer.AnalyzedFiles);
+        Assert.Contains(Path.GetFullPath(binFile), analyzer.AnalyzedFiles);
+        Assert.DoesNotContain(Path.GetFullPath(generatedFile), analyzer.AnalyzedFiles);
+    }
+
+    [Fact]
+    public async Task IndexAsync_ReportsSequentialEmbeddingProgress()
+    {
+        using var workspace = new TemporaryWorkspace();
+        workspace.WriteFile("src/First.cs", "first");
+        workspace.WriteFile("src/Second.cs", "second");
+        workspace.WriteFile("src/Third.cs", "third");
+        var progress = new RecordingProgress();
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(State(workspace.RootPath)),
+            new FakeVectorStore(),
+            new FakeAnalyzer(),
+            options: new RagNetOptions
+            {
+                Indexing = new IndexingOptions
+                {
+                    MaxEmbeddingConcurrency = 2,
+                    MaxEmbeddingBatchSize = 1
+                }
+            });
+
+        await indexer.IndexAsync(workspace.RootPath, progress: progress);
+
+        var embeddingProgress = progress.Reports
+            .Where(report => report.Stage == IndexingProgressStage.CreatingEmbeddings)
+            .Select(report => (report.Current, report.Total))
+            .ToArray();
+
+        Assert.Equal((0, 3), embeddingProgress[0]);
+        Assert.Equal([1, 2, 3], embeddingProgress.Skip(1).Select(report => report.Current).Order().ToArray());
+        Assert.All(embeddingProgress, report => Assert.Equal(3, report.Total));
     }
 
     [Fact]
@@ -599,7 +789,9 @@ public sealed class WorkspaceIndexerTests
                 Result(file, "OtherTests", 20, 25, 0.7, "third", IndexProfiles.Tests)
             ]
         };
-        var indexer = CreateIndexer(workspace.RootPath, new FakeStateStore(State(workspace.RootPath)), vectorStore, new FakeAnalyzer());
+        var registry = new FakeIndexedWorkspaceRegistry();
+        registry.Records.Add(IndexedWorkspace(workspace.RootPath) with { CollectionName = "active-search-collection" });
+        var indexer = CreateIndexer(workspace.RootPath, new FakeStateStore(State(workspace.RootPath)), vectorStore, new FakeAnalyzer(), registry);
 
         var results = await indexer.SearchAsync(
             file,
@@ -615,6 +807,7 @@ public sealed class WorkspaceIndexerTests
 
         Assert.Equal(10, vectorStore.LastSearchLimit);
         Assert.True(vectorStore.LastSearchHybrid);
+        Assert.Equal("active-search-collection", vectorStore.LastSearchCollectionName);
         Assert.Equal(IndexedContentTypes.Code, vectorStore.LastSearchContentType);
         Assert.Equal(IndexProfiles.Tests, vectorStore.LastSearchIndexProfile);
         Assert.Equal(2, results.Count);
@@ -628,7 +821,8 @@ public sealed class WorkspaceIndexerTests
         FakeAnalyzer analyzer,
         FakeIndexedWorkspaceRegistry? registry = null,
         FakeEmbeddingProvider? embeddingProvider = null,
-        RagNetOptions? options = null)
+        RagNetOptions? options = null,
+        FakeSourceChangeDetector? sourceChangeDetector = null)
     {
         var provider = embeddingProvider ?? new FakeEmbeddingProvider();
         return new(
@@ -642,6 +836,7 @@ public sealed class WorkspaceIndexerTests
             provider,
             vectorStore,
             new FakeSourceIdentityResolver(),
+            sourceChangeDetector ?? new FakeSourceChangeDetector(),
             Options.Create(options ?? new RagNetOptions()));
     }
 
@@ -886,7 +1081,11 @@ public sealed class WorkspaceIndexerTests
 
         public List<float[]> UpsertedEmbeddings { get; } = [];
 
+        public string? LastUpsertCollectionName { get; private set; }
+
         public bool WorkspaceDeleted { get; private set; }
+
+        public bool ThrowOnUpsert { get; init; }
 
         public IReadOnlyList<SearchResult> SearchResults { get; init; } = [];
 
@@ -894,12 +1093,23 @@ public sealed class WorkspaceIndexerTests
 
         public bool LastSearchHybrid { get; private set; }
 
+        public string? LastSearchCollectionName { get; private set; }
+
         public string? LastSearchContentType { get; private set; }
 
         public string? LastSearchIndexProfile { get; private set; }
 
         public Task UpsertAsync(string workspaceRoot, IReadOnlyList<CodeChunk> chunks, IReadOnlyList<float[]> embeddings, CancellationToken cancellationToken = default)
+            => UpsertAsync(workspaceRoot, workspaceRoot, chunks, embeddings, cancellationToken);
+
+        public Task UpsertAsync(string workspaceRoot, string collectionName, IReadOnlyList<CodeChunk> chunks, IReadOnlyList<float[]> embeddings, CancellationToken cancellationToken = default)
         {
+            if (ThrowOnUpsert)
+            {
+                throw new InvalidOperationException("upsert failed");
+            }
+
+            LastUpsertCollectionName = collectionName;
             UpsertedChunks.AddRange(chunks);
             UpsertedEmbeddings.AddRange(embeddings);
             return Task.CompletedTask;
@@ -909,6 +1119,9 @@ public sealed class WorkspaceIndexerTests
             => DeleteByFilesAsync(workspaceRoot, [filePath], cancellationToken);
 
         public Task DeleteByFilesAsync(string workspaceRoot, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default)
+            => DeleteByFilesAsync(workspaceRoot, workspaceRoot, filePaths, cancellationToken);
+
+        public Task DeleteByFilesAsync(string workspaceRoot, string collectionName, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default)
         {
             DeletedFiles.AddRange(filePaths.Select(Path.GetFullPath));
             return Task.CompletedTask;
@@ -929,12 +1142,41 @@ public sealed class WorkspaceIndexerTests
             string? contentType = null,
             string? indexProfile = null,
             CancellationToken cancellationToken = default)
+            => SearchAsync(workspaceRoot, workspaceRoot, embedding, query, limit, hybrid, contentType, indexProfile, cancellationToken);
+
+        public Task<IReadOnlyList<SearchResult>> SearchAsync(
+            string workspaceRoot,
+            string collectionName,
+            float[] embedding,
+            string query,
+            int limit,
+            bool hybrid,
+            string? contentType = null,
+            string? indexProfile = null,
+            CancellationToken cancellationToken = default)
         {
             LastSearchLimit = limit;
             LastSearchHybrid = hybrid;
+            LastSearchCollectionName = collectionName;
             LastSearchContentType = contentType;
             LastSearchIndexProfile = indexProfile;
             return Task.FromResult(SearchResults);
+        }
+
+    }
+
+    private sealed class RecordingProgress : IProgress<IndexingProgress>
+    {
+        private readonly object _gate = new();
+
+        public List<IndexingProgress> Reports { get; } = [];
+
+        public void Report(IndexingProgress value)
+        {
+            lock (_gate)
+            {
+                Reports.Add(value);
+            }
         }
     }
 
@@ -982,5 +1224,20 @@ public sealed class WorkspaceIndexerTests
     {
         public Task<SourceIdentity> ResolveAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default)
             => Task.FromResult(SourceIdentity.Local(workspaceRoot, filePath));
+    }
+
+    private sealed class FakeSourceChangeDetector(SourceChangeSet? changeSet = null) : ISourceChangeDetector
+    {
+        public bool WasCalled { get; private set; }
+
+        public Task<SourceChangeSet> DetectChangesAsync(
+            string workspaceRoot,
+            IReadOnlyList<string> candidateFiles,
+            IReadOnlyList<string> previouslyIndexedFiles,
+            CancellationToken cancellationToken = default)
+        {
+            WasCalled = true;
+            return Task.FromResult(changeSet ?? SourceChangeSet.Unavailable("test"));
+        }
     }
 }

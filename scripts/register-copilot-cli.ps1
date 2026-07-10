@@ -1,156 +1,136 @@
 param(
     [string]$Url = "http://localhost:7331/ragnet-mcp",
     [string]$Name = "ragnet-mcp",
+    [string]$ConfigPath = $env:COPILOT_MCP_CONFIG,
     [switch]$Optional
 )
 
 $ErrorActionPreference = "Stop"
 
-function Resolve-CommandSource {
-    param(
-        [string]$Name,
-        [string[]]$CandidatePaths = @()
-    )
-
-    $command = Get-Command $Name -ErrorAction SilentlyContinue
-    if ($command) {
-        return $command.Source
+function Get-DefaultCopilotMcpConfigPath {
+    if ($ConfigPath) {
+        return $ConfigPath
     }
 
-    foreach ($candidate in $CandidatePaths) {
-        if ($candidate -and (Test-Path $candidate)) {
-            return $candidate
-        }
+    if ($env:USERPROFILE) {
+        return (Join-Path $env:USERPROFILE ".copilot\mcp.json")
     }
 
-    return $null
+    if ($env:HOME) {
+        return (Join-Path $env:HOME ".copilot/mcp.json")
+    }
+
+    throw "Cannot determine a user profile directory for GitHub Copilot CLI MCP config."
 }
 
-function Invoke-ExternalCommand {
+function Read-JsonObject {
+    param([Parameter(Mandatory = $true)] [string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        return [ordered]@{}
+    }
+
+    $text = [System.IO.File]::ReadAllText($Path)
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return [ordered]@{}
+    }
+
+    $converted = ConvertTo-Hashtable ($text | ConvertFrom-Json)
+    if ($converted -is [System.Collections.IDictionary]) {
+        return $converted
+    }
+
+    return [ordered]@{}
+}
+
+function ConvertTo-Hashtable {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return [ordered]@{}
+    }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        $result = [ordered]@{}
+        foreach ($key in $Value.Keys) {
+            $result[$key] = ConvertTo-Hashtable $Value[$key]
+        }
+
+        return $result
+    }
+
+    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        return @($Value | ForEach-Object { ConvertTo-Hashtable $_ })
+    }
+
+    if ($Value.PSObject.Properties.Count -gt 0 -and $Value.GetType().Namespace -ne "System") {
+        $result = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) {
+            $result[$property.Name] = ConvertTo-Hashtable $property.Value
+        }
+
+        return $result
+    }
+
+    return $Value
+}
+
+function Write-Utf8Json {
     param(
-        [string]$Executable,
-        [string[]]$Arguments
+        [Parameter(Mandatory = $true)] [object]$Value,
+        [Parameter(Mandatory = $true)] [string]$Path
     )
 
-    $output = & $Executable @Arguments 2>&1
-    [pscustomobject]@{
-        ExitCode = $LASTEXITCODE
-        Output = ($output | Out-String).Trim()
+    $directory = Split-Path -Parent $Path
+    if ($directory -and -not (Test-Path $directory)) {
+        New-Item -ItemType Directory -Path $directory | Out-Null
+    }
+
+    $json = $Value | ConvertTo-Json -Depth 16
+    [System.IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Set-McpServer {
+    param(
+        [Parameter(Mandatory = $true)] [System.Collections.IDictionary]$Config,
+        [Parameter(Mandatory = $true)] [string]$SectionName,
+        [Parameter(Mandatory = $true)] [string]$ServerName,
+        [Parameter(Mandatory = $true)] [string]$ServerUrl
+    )
+
+    if (-not $Config.Contains($SectionName) -or $null -eq $Config[$SectionName]) {
+        $Config[$SectionName] = [ordered]@{}
+    }
+
+    $Config[$SectionName][$ServerName] = [ordered]@{
+        type = "http"
+        transport = "http"
+        url = $ServerUrl
     }
 }
 
-function Test-McpCommand {
-    param(
-        [string]$Executable,
-        [string[]]$HelpArguments
-    )
+try {
+    $resolvedConfigPath = Get-DefaultCopilotMcpConfigPath
+    $config = Read-JsonObject -Path $resolvedConfigPath
 
-    try {
-        $result = Invoke-ExternalCommand -Executable $Executable -Arguments $HelpArguments
-        return $result.ExitCode -eq 0 -and $result.Output -match "\bmcp\b"
+    if ($config.Contains("servers")) {
+        Set-McpServer -Config $config -SectionName "servers" -ServerName $Name -ServerUrl $Url
     }
-    catch {
-        return $false
+    else {
+        Set-McpServer -Config $config -SectionName "mcpServers" -ServerName $Name -ServerUrl $Url
     }
+
+    Write-Utf8Json -Value $config -Path $resolvedConfigPath
+
+    Write-Host "Registered GitHub Copilot CLI MCP config:"
+    Write-Host "  $Name -> $Url"
+    Write-Host "  Config: $resolvedConfigPath"
 }
-
-function Register-WithCopilotCommand {
-    param(
-        [string]$Executable,
-        [string[]]$HelpArguments,
-        [string[][]]$RemoveVariants,
-        [string[][]]$AddVariants,
-        [string]$DisplayName
-    )
-
-    if (-not (Test-McpCommand -Executable $Executable -HelpArguments $HelpArguments)) {
-        return $false
-    }
-
-    foreach ($variant in $RemoveVariants) {
-        try {
-            $null = Invoke-ExternalCommand -Executable $Executable -Arguments $variant
-        }
-        catch {
-            # Removal can fail when the server is not registered yet.
-        }
-    }
-
-    $lastError = $null
-    foreach ($variant in $AddVariants) {
-        $result = Invoke-ExternalCommand -Executable $Executable -Arguments $variant
-        if ($result.ExitCode -eq 0) {
-            Write-Host "Registered GitHub Copilot CLI MCP server:"
-            Write-Host "  $Name -> $Url"
-            Write-Host "  CLI: $DisplayName"
-            return $true
-        }
-
-        $lastError = $result.Output
-    }
-
-    if ($lastError) {
-        throw "GitHub Copilot CLI MCP registration failed for ${DisplayName}: $lastError"
-    }
-
-    throw "GitHub Copilot CLI MCP registration failed for ${DisplayName}."
-}
-
-$copilotCommand = Resolve-CommandSource -Name "copilot"
-if ($copilotCommand) {
-    $registered = Register-WithCopilotCommand `
-        -Executable $copilotCommand `
-        -HelpArguments @("mcp", "--help") `
-        -RemoveVariants @(
-            @("mcp", "remove", $Name),
-            @("mcp", "delete", $Name)
-        ) `
-        -AddVariants @(
-            @("mcp", "add", $Name, "--url", $Url),
-            @("mcp", "add", $Name, $Url),
-            @("mcp", "add", "--transport", "http", $Name, $Url)
-        ) `
-        -DisplayName "copilot"
-
-    if ($registered) {
+catch {
+    if ($Optional) {
+        Write-Warning "GitHub Copilot CLI MCP config was not written: $($_.Exception.Message)"
         return
     }
+
+    throw
 }
-
-$ghCandidatePaths = @()
-if ($env:ProgramFiles) {
-    $ghCandidatePaths += (Join-Path $env:ProgramFiles "GitHub CLI\gh.exe")
-}
-
-if ($env:LOCALAPPDATA) {
-    $ghCandidatePaths += (Join-Path $env:LOCALAPPDATA "GitHub CLI\gh.exe")
-}
-
-$ghCommand = Resolve-CommandSource -Name "gh" -CandidatePaths $ghCandidatePaths
-if ($ghCommand) {
-    $registered = Register-WithCopilotCommand `
-        -Executable $ghCommand `
-        -HelpArguments @("copilot", "--", "mcp", "--help") `
-        -RemoveVariants @(
-            @("copilot", "--", "mcp", "remove", $Name),
-            @("copilot", "--", "mcp", "delete", $Name)
-        ) `
-        -AddVariants @(
-            @("copilot", "--", "mcp", "add", $Name, "--url", $Url),
-            @("copilot", "--", "mcp", "add", $Name, $Url),
-            @("copilot", "--", "mcp", "add", "--transport", "http", $Name, $Url)
-        ) `
-        -DisplayName "gh copilot"
-
-    if ($registered) {
-        return
-    }
-}
-
-$message = "GitHub Copilot CLI with MCP support was not found on PATH; skipping GitHub Copilot CLI MCP registration."
-if ($Optional) {
-    Write-Warning $message
-    return
-}
-
-throw $message

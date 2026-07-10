@@ -21,6 +21,12 @@ public interface IWorkspaceTransferService
 
     Task<WorkspaceMigrationResult> MigrateAsync(CancellationToken cancellationToken = default);
 
+    Task<WorkspaceRecoveryResult> RecoverWorkspaceAsync(
+        string workspaceRoot,
+        IReadOnlyList<string>? indexedTargets = null,
+        string? embeddingModel = null,
+        CancellationToken cancellationToken = default);
+
     Task<WorkspaceCollectionStatusResult> ResolveCollectionsAsync(
         string? workspace = null,
         string? group = null,
@@ -56,6 +62,16 @@ public sealed record ImportedWorkspaceResult(
 public sealed record WorkspaceMigrationResult(
     int WorkspacesScanned,
     int WorkspacesUpdated,
+    IReadOnlyList<string> Warnings);
+
+public sealed record WorkspaceRecoveryResult(
+    string WorkspaceRoot,
+    string WorkspaceId,
+    string CollectionName,
+    int PointsScanned,
+    int FilesRecovered,
+    int MissingFiles,
+    IReadOnlyList<string> IndexedTargets,
     IReadOnlyList<string> Warnings);
 
 public sealed record WorkspaceCollectionStatusResult(

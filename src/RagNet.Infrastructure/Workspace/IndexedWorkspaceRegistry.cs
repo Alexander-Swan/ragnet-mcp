@@ -9,9 +9,10 @@ public sealed class IndexedWorkspaceRegistry : IIndexedWorkspaceRegistry
 
     public Task MarkIndexedAsync(IndexedWorkspaceRecord record, CancellationToken cancellationToken = default)
     {
+        var namedRecord = record.WithCalculatedNames();
         lock (_gate)
         {
-            _records[Path.GetFullPath(record.WorkspaceRoot)] = record;
+            _records[Path.GetFullPath(namedRecord.WorkspaceRoot)] = namedRecord;
         }
 
         return Task.CompletedTask;

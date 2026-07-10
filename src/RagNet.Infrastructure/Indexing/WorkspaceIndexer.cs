@@ -30,6 +30,7 @@ public sealed class WorkspaceIndexer(
     IEmbeddingModelCatalog embeddingModelCatalog,
     IVectorStore vectorStore,
     ISourceIdentityResolver sourceIdentityResolver,
+    ISourceChangeDetector sourceChangeDetector,
     IOptions<RagNetOptions> options) : IWorkspaceIndexer
 {
     private const int SearchCandidateMultiplier = 5;
@@ -183,18 +184,16 @@ public sealed class WorkspaceIndexer(
         }
 
         var workspaceRoot = targetPlan.WorkspaceRoot;
-
-        if (analysis.FullReindex && !analysis.MergeScopedState)
-        {
-            await vectorStore.DeleteWorkspaceAsync(workspaceRoot, cancellationToken);
-        }
+        var targetCollectionName = analysis.FullReindex && !analysis.MergeScopedState
+            ? QdrantCollectionNaming.GetStagingCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot, DateTimeOffset.UtcNow)
+            : await ResolveActiveCollectionNameAsync(workspaceRoot, cancellationToken);
 
         var filesToDelete = analysis.DeletedFiles.Concat(analysis.ChangedFiles).ToArray();
         Report(progress, workspaceRoot, IndexingProgressStage.DeletingVectors, 0, filesToDelete.Length, "Deleting stale vectors.");
-        if (filesToDelete.Length > 0)
+        if (filesToDelete.Length > 0 && (analysis.MergeScopedState || !analysis.FullReindex))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await vectorStore.DeleteByFilesAsync(workspaceRoot, filesToDelete, cancellationToken);
+            await vectorStore.DeleteByFilesAsync(workspaceRoot, targetCollectionName, filesToDelete, cancellationToken);
         }
 
         Report(progress, workspaceRoot, IndexingProgressStage.DeletingVectors, filesToDelete.Length, filesToDelete.Length, "Deleting stale vectors.");
@@ -206,7 +205,7 @@ public sealed class WorkspaceIndexer(
         if (embeddedChunks.Count > 0)
         {
             Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, 0, embeddedChunks.Count, "Writing vectors to store.");
-            await vectorStore.UpsertAsync(workspaceRoot, embeddedChunks, embeddings, cancellationToken);
+            await vectorStore.UpsertAsync(workspaceRoot, targetCollectionName, embeddedChunks, embeddings, cancellationToken);
             Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, embeddedChunks.Count, embeddedChunks.Count, "Writing vectors to store.");
         }
 
@@ -241,7 +240,7 @@ public sealed class WorkspaceIndexer(
         await indexedWorkspaceRegistry.MarkIndexedAsync(new IndexedWorkspaceRecord(
             workspaceRoot,
             QdrantCollectionNaming.GetWorkspaceId(workspaceRoot),
-            QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot),
+            targetCollectionName,
             await GetWorkspaceGroupsForRootAsync(workspaceRoot, cancellationToken),
             targetPlan.IndexedTargets,
             indexedAtUtc,
@@ -487,29 +486,6 @@ public sealed class WorkspaceIndexer(
         var profileFiles = targetPlan.EnumerateFiles()
             .Where(file => FileMatchesProfile(file, indexProfile))
             .ToArray();
-        var currentFiles = new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase);
-        var scanned = 0;
-
-        Report(progress, workspaceRoot, IndexingProgressStage.ScanningFiles, 0, profileFiles.Length, "Scanning files.");
-
-        foreach (var file in profileFiles)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            try
-            {
-                var fileState = ComputeIndexedFileState(file);
-                currentFiles[fileState.FilePath] = fileState;
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                warnings.Add($"{file}: {ex.Message}");
-            }
-
-            scanned++;
-            Report(progress, workspaceRoot, IndexingProgressStage.ScanningFiles, scanned, profileFiles.Length, "Scanning files.");
-        }
-
         Report(progress, workspaceRoot, IndexingProgressStage.ComparingState, 0, null, "Comparing with previous index state.");
         var previousState = await indexStateStore.LoadAsync(workspaceRoot, cancellationToken);
         var stateCompatible = !previousState.StateExists || IsStateCompatible(previousState, embeddingModel);
@@ -517,6 +493,12 @@ public sealed class WorkspaceIndexer(
         var targetScoped = !targetPlan.IsFullWorkspace;
         var mergeScopedState = profileScoped || targetScoped;
         var fullReindex = force || !stateCompatible;
+        if (!stateCompatible && !force && !allowIncompatibleScopedState)
+        {
+            throw new InvalidOperationException(
+                "Existing index state is incompatible with the current embedding model or schema. RagNet will not delete or overwrite the active index automatically. Recover by rerunning with --force to build and promote a replacement staging collection, migrate the stored state to the current schema, or adopt/delete the old collection explicitly after verifying it is no longer needed.");
+        }
+
         if (force)
         {
             warnings.Add(mergeScopedState
@@ -543,17 +525,57 @@ public sealed class WorkspaceIndexer(
             previousState = EmptyState(workspaceRoot);
         }
 
-        var changedFiles = currentFiles.Values
-            .Where(file => force ||
-                !previousState.Files.TryGetValue(file.FilePath, out var previous) ||
-                !string.Equals(previous.Fingerprint, file.Fingerprint, StringComparison.Ordinal))
-            .Select(file => file.FilePath)
-            .ToArray();
-        var deletedFiles = previousState.Files.Keys
-            .Where(file => FileMatchesProfile(file, indexProfile) &&
-                targetPlan.CanDeleteMissingFile(file) &&
-                !currentFiles.ContainsKey(file))
-            .ToArray();
+        var scanPlan = await CreateFileScanPlanAsync(
+            targetPlan,
+            previousState,
+            profileFiles,
+            force,
+            indexProfile,
+            fullReindex,
+            cancellationToken);
+        var currentFiles = new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in scanPlan.PreservedFiles)
+        {
+            currentFiles[file.FilePath] = file;
+        }
+
+        var scanned = 0;
+        Report(progress, workspaceRoot, IndexingProgressStage.ScanningFiles, 0, scanPlan.FilesToScan.Count, "Scanning files.");
+        foreach (var file in scanPlan.FilesToScan)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                var fileState = ComputeIndexedFileState(file);
+                currentFiles[fileState.FilePath] = fileState;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                warnings.Add($"{file}: {ex.Message}");
+            }
+
+            scanned++;
+            Report(progress, workspaceRoot, IndexingProgressStage.ScanningFiles, scanned, scanPlan.FilesToScan.Count, "Scanning files.");
+        }
+
+        var changedFiles = scanPlan.ChangeDetectorUsed
+            ? scanPlan.FilesToScan
+                .Where(file => currentFiles.ContainsKey(file))
+                .ToArray()
+            : currentFiles.Values
+                .Where(file => force ||
+                    !previousState.Files.TryGetValue(file.FilePath, out var previous) ||
+                    !string.Equals(previous.Fingerprint, file.Fingerprint, StringComparison.Ordinal))
+                .Select(file => file.FilePath)
+                .ToArray();
+        var deletedFiles = scanPlan.ChangeDetectorUsed
+            ? scanPlan.DeletedFiles
+            : previousState.Files.Keys
+                .Where(file => FileMatchesProfile(file, indexProfile) &&
+                    targetPlan.CanDeleteMissingFile(file) &&
+                    !currentFiles.ContainsKey(file))
+                .ToArray();
         var changedSet = changedFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var unchangedFileCount = currentFiles.Keys.Count(file => !changedSet.Contains(file));
         var chunks = new List<CodeChunk>();
@@ -599,11 +621,56 @@ public sealed class WorkspaceIndexer(
             chunks,
             workspaceSourceIdentity,
             warnings,
-            profileFiles.Length,
+            scanPlan.FilesToScan.Count,
             fullReindex,
             stateCompatible,
             mergeScopedState,
             unchangedFileCount);
+    }
+
+    private async Task<FileScanPlan> CreateFileScanPlanAsync(
+        WorkspaceIndexTargetPlan targetPlan,
+        WorkspaceIndexState previousState,
+        IReadOnlyList<string> profileFiles,
+        bool force,
+        string indexProfile,
+        bool fullReindex,
+        CancellationToken cancellationToken)
+    {
+        if (force || fullReindex || !previousState.StateExists)
+        {
+            return FileScanPlan.Fallback(profileFiles);
+        }
+
+        var previousScopedFiles = previousState.Files.Values
+            .Where(file => FileMatchesProfile(file.FilePath, indexProfile) && targetPlan.CanDeleteMissingFile(file.FilePath))
+            .ToArray();
+        var changeSet = await sourceChangeDetector.DetectChangesAsync(
+            targetPlan.WorkspaceRoot,
+            profileFiles,
+            previousScopedFiles.Select(file => file.FilePath).ToArray(),
+            cancellationToken);
+        if (!changeSet.IsAvailable)
+        {
+            return FileScanPlan.Fallback(profileFiles);
+        }
+
+        var candidateSet = profileFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var changedFiles = changeSet.ChangedFiles
+            .Where(file => candidateSet.Contains(file) && File.Exists(file))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var deletedFiles = changeSet.DeletedFiles
+            .Where(file => FileMatchesProfile(file, indexProfile) && targetPlan.CanDeleteMissingFile(file))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var changedSet = changedFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var deletedSet = deletedFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var preserved = previousState.Files.Values
+            .Where(file => !changedSet.Contains(file.FilePath) && !deletedSet.Contains(file.FilePath))
+            .ToArray();
+
+        return new FileScanPlan(changedFiles, preserved, deletedFiles, ChangeDetectorUsed: true);
     }
 
     public async Task<IReadOnlyList<IndexWorkspaceResult>> IndexGroupAsync(
@@ -835,8 +902,10 @@ public sealed class WorkspaceIndexer(
         foreach (var workspace in workspaces)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var collectionName = await ResolveActiveCollectionNameAsync(workspace.RootPath, cancellationToken);
             results.AddRange(await vectorStore.SearchAsync(
                 workspace.RootPath,
+                collectionName,
                 embedding,
                 query,
                 candidateLimit,
@@ -1158,9 +1227,19 @@ public sealed class WorkspaceIndexer(
     private async Task<int> GetPreviousRegistryChunkCountAsync(string workspaceRoot, CancellationToken cancellationToken)
     {
         var previous = (await indexedWorkspaceRegistry.GetIndexedWorkspacesAsync(cancellationToken))
-            .FirstOrDefault(workspace => string.Equals(workspace.WorkspaceRoot, workspaceRoot, StringComparison.OrdinalIgnoreCase));
+            .LastOrDefault(workspace => string.Equals(workspace.WorkspaceRoot, workspaceRoot, StringComparison.OrdinalIgnoreCase));
 
         return previous?.ChunksIndexed ?? 0;
+    }
+
+    private async Task<string> ResolveActiveCollectionNameAsync(string workspaceRoot, CancellationToken cancellationToken)
+    {
+        var previous = (await indexedWorkspaceRegistry.GetIndexedWorkspacesAsync(cancellationToken))
+            .LastOrDefault(workspace => string.Equals(workspace.WorkspaceRoot, workspaceRoot, StringComparison.OrdinalIgnoreCase));
+
+        return string.IsNullOrWhiteSpace(previous?.CollectionName)
+            ? QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot)
+            : previous.CollectionName;
     }
 
     private static IReadOnlyDictionary<string, int> CountChunksByFile(IReadOnlyList<CodeChunk> chunks)
@@ -1637,6 +1716,16 @@ public sealed class WorkspaceIndexer(
         bool StateCompatible,
         bool MergeScopedState,
         int UnchangedFileCount);
+
+    private sealed record FileScanPlan(
+        IReadOnlyList<string> FilesToScan,
+        IReadOnlyList<IndexedFileState> PreservedFiles,
+        IReadOnlyList<string> DeletedFiles,
+        bool ChangeDetectorUsed)
+    {
+        public static FileScanPlan Fallback(IReadOnlyList<string> filesToScan)
+            => new(filesToScan, [], [], ChangeDetectorUsed: false);
+    }
 
     private sealed record EmbeddedChunk(CodeChunk Chunk, float[] Embedding);
 

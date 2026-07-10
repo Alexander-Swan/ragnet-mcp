@@ -147,6 +147,59 @@ public sealed class QdrantWorkspaceTransferServiceTests
         Assert.Equal(newRoot, Assert.Single(registry.Marked).WorkspaceRoot);
     }
 
+    [Fact]
+    public async Task RecoverWorkspaceAsync_RebuildsRegistryAndStateFromExistingCollection()
+    {
+        using var handler = new FakeQdrantHandler();
+        using var workspace = new TemporaryDirectory();
+        var filePath = Path.Combine(workspace.Path, "Program.cs");
+        await File.WriteAllTextAsync(filePath, "hello");
+        var collectionName = QdrantCollectionNaming.GetCollectionName("test", workspace.Path);
+        handler.Enqueue(HttpStatusCode.OK, """{"result":{"status":"green"}}""");
+        handler.Enqueue(HttpStatusCode.OK, $$"""
+            {
+              "result": {
+                "points": [
+                  {
+                    "id": "11111111-1111-5111-8111-111111111111",
+                    "payload": {
+                      "workspace_root": {{JsonSerializer.Serialize(workspace.Path)}},
+                      "file_path": {{JsonSerializer.Serialize(filePath)}},
+                      "schema_version": 1
+                    }
+                  },
+                  {
+                    "id": "22222222-2222-5222-8222-222222222222",
+                    "payload": {
+                      "workspace_root": {{JsonSerializer.Serialize(workspace.Path)}},
+                      "file_path": {{JsonSerializer.Serialize(filePath)}},
+                      "schema_version": 1
+                    }
+                  }
+                ]
+              }
+            }
+            """);
+        var registry = new FakeWorkspaceRegistry();
+        var stateStore = new FakeStateStore();
+        var service = CreateService(handler, registry, new FakeGroupRegistry(), stateStore);
+
+        var result = await service.RecoverWorkspaceAsync(workspace.Path, [filePath], "test-model");
+
+        Assert.Equal(collectionName, result.CollectionName);
+        Assert.Equal(2, result.PointsScanned);
+        Assert.Equal(1, result.FilesRecovered);
+        var savedState = Assert.Single(stateStore.Saved);
+        Assert.Equal("test-model", savedState.EmbeddingModel);
+        Assert.Equal(IndexSchemaVersions.CurrentText, savedState.SchemaVersion);
+        Assert.Equal(2, Assert.Single(savedState.Files.Values).ChunkCount);
+        var record = Assert.Single(registry.Marked);
+        Assert.Equal(workspace.Path, record.WorkspaceRoot);
+        Assert.Equal(collectionName, record.CollectionName);
+        Assert.Equal(2, record.ChunksIndexed);
+        Assert.Equal(filePath, Assert.Single(record.IndexedTargets));
+    }
+
     private static QdrantWorkspaceTransferService CreateService(
         FakeQdrantHandler handler,
         FakeWorkspaceRegistry workspaceRegistry,

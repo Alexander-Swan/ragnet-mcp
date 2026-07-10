@@ -195,7 +195,7 @@ Setup registers `ragnet-mcp` where the relevant client is available:
 
 - Visual Studio / GitHub Copilot app: `.mcp.json`
 - VS Code / GitHub Copilot app: `.vscode/mcp.json`
-- GitHub Copilot CLI: user-local CLI MCP registration when a compatible `copilot` or `gh copilot` command is available
+- GitHub Copilot CLI: user-local MCP config at `%USERPROFILE%\.copilot\mcp.json` by default
 - Codex and Codex CLI: `$HOME\.codex\config.toml`
 - Claude Code: user-scope Claude MCP config
 
@@ -229,6 +229,8 @@ Individual registration scripts:
 .\scripts\register-claude.ps1
 ```
 
+Set `COPILOT_MCP_CONFIG` or pass `-ConfigPath` to `register-copilot-cli.ps1` if your Copilot CLI build reads MCP servers from a different file.
+
 Restart Visual Studio, VS Code, GitHub Copilot CLI, Codex, or Claude Code if the MCP server is not discovered immediately.
 
 ## Index A Workspace
@@ -252,6 +254,8 @@ For normal local Windows paths like `D:\Work\Product\Api`, use the local indexer
 .\bin\ragnet-indexer.exe index --current
 .\bin\ragnet-indexer.exe index -w "D:\Work\Product\Api\Api.sln" -w "D:\Work\Product\docs\api"
 ```
+
+After local indexing registers a Windows workspace in Qdrant, Docker-hosted MCP search can accept Windows `file_path` values for that indexed workspace. It resolves them through the workspace registry instead of trying to read `C:\...` inside the Linux container. MCP indexing still requires a container-visible path; use the local indexer for host-path indexing.
 
 Use `--current` or `-c` to index the current directory. Repeat `--workspace` to union multiple targets. Two solution files in the same repo index only those two solution graphs. If no target is provided and the current directory is inside an already indexed workspace, the CLI reindexes that workspace incrementally. Add `--group` to save that target set under a local group name for future runs:
 

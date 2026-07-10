@@ -22,8 +22,8 @@ public sealed class WorkspaceScopeResolver(
             WorkspaceScopeKind.CurrentWorkspace => await ResolveWorkspaceAsync(Required(filePath, "file_path"), includeGroupedWorkspaces, cancellationToken),
             WorkspaceScopeKind.ExplicitWorkspaceRoot => await ResolveWorkspaceAsync(Required(workspaceRoot, "workspace_root"), includeGroupedWorkspaces, cancellationToken),
             WorkspaceScopeKind.NamedWorkspaceGroup => await ResolveGroupAsync(Required(workspaceGroup, "workspace_group"), cancellationToken),
-            WorkspaceScopeKind.AllIndexedWorkspaces => (await indexedWorkspaceRegistry.GetIndexedWorkspaceRootsAsync(cancellationToken))
-                .Select(root => new WorkspaceInfo(root, new DirectoryInfo(root).Name, null, null))
+            WorkspaceScopeKind.AllIndexedWorkspaces => (await indexedWorkspaceRegistry.GetIndexedWorkspacesAsync(cancellationToken))
+                .Select(workspace => new WorkspaceInfo(workspace.WorkspaceRoot, workspace.EffectiveDisplayName, null, null))
                 .ToArray(),
             _ => throw new InvalidOperationException($"Unsupported workspace scope '{scope}'.")
         };
@@ -34,7 +34,8 @@ public sealed class WorkspaceScopeResolver(
         bool includeGroupedWorkspaces,
         CancellationToken cancellationToken)
     {
-        var workspace = await workspaceDetector.DetectAsync(path, cancellationToken);
+        var workspace = await ResolveIndexedWorkspaceForPathAsync(path, cancellationToken)
+            ?? await workspaceDetector.DetectAsync(path, cancellationToken);
         if (!includeGroupedWorkspaces)
         {
             return [workspace];
@@ -49,19 +50,20 @@ public sealed class WorkspaceScopeResolver(
         var resolved = new List<WorkspaceInfo> { workspace };
         var seenRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            NormalizePath(workspace.RootPath)
+            NormalizeComparablePath(workspace.RootPath)
         };
 
         foreach (var root in groupRoots)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var normalizedRoot = NormalizePath(root);
+            var normalizedRoot = NormalizeComparablePath(root);
             if (!seenRoots.Add(normalizedRoot))
             {
                 continue;
             }
 
-            resolved.Add(await workspaceDetector.DetectAsync(root, cancellationToken));
+            resolved.Add(await ResolveIndexedWorkspaceForPathAsync(root, cancellationToken)
+                ?? await workspaceDetector.DetectAsync(root, cancellationToken));
         }
 
         return resolved;
@@ -79,7 +81,8 @@ public sealed class WorkspaceScopeResolver(
         foreach (var root in group.Roots)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            workspaces.Add(await workspaceDetector.DetectAsync(root, cancellationToken));
+            workspaces.Add(await ResolveIndexedWorkspaceForPathAsync(root, cancellationToken)
+                ?? await workspaceDetector.DetectAsync(root, cancellationToken));
         }
 
         return workspaces;
@@ -87,13 +90,33 @@ public sealed class WorkspaceScopeResolver(
 
     private async Task<IReadOnlyList<string>> GetGroupedWorkspaceRootsAsync(string workspaceRoot, CancellationToken cancellationToken)
     {
-        var normalizedWorkspaceRoot = NormalizePath(workspaceRoot);
+        var normalizedWorkspaceRoot = NormalizeComparablePath(workspaceRoot);
         var groups = await workspaceGroupRegistry.GetGroupsAsync(cancellationToken);
 
         return groups
-            .Where(group => group.Roots.Any(root => string.Equals(NormalizePath(root), normalizedWorkspaceRoot, StringComparison.OrdinalIgnoreCase)))
+            .Where(group => group.Roots.Any(root => string.Equals(NormalizeComparablePath(root), normalizedWorkspaceRoot, StringComparison.OrdinalIgnoreCase)))
             .SelectMany(group => group.Roots)
             .ToArray();
+    }
+
+    private async Task<WorkspaceInfo?> ResolveIndexedWorkspaceForPathAsync(string path, CancellationToken cancellationToken)
+    {
+        var workspaces = await indexedWorkspaceRegistry.GetIndexedWorkspacesAsync(cancellationToken);
+        if (workspaces.Count == 0)
+        {
+            return null;
+        }
+
+        var normalizedPath = NormalizeComparablePath(path);
+        var match = workspaces
+            .OrderByDescending(workspace => NormalizeComparablePath(workspace.WorkspaceRoot).Length)
+            .FirstOrDefault(workspace =>
+                IndexedWorkspaceRecordNames.MatchesAlias(workspace, path) ||
+                IsPathUnderRoot(normalizedPath, NormalizeComparablePath(workspace.WorkspaceRoot)));
+
+        return match is null
+            ? null
+            : new WorkspaceInfo(match.WorkspaceRoot, match.EffectiveDisplayName, null, null);
     }
 
     private static WorkspaceScopeKind ParseScope(string? scope, string? workspaceRoot, string? workspaceGroup)
@@ -121,6 +144,27 @@ public sealed class WorkspaceScopeResolver(
     private static string Required(string? value, string name)
         => string.IsNullOrWhiteSpace(value) ? throw new ArgumentException($"{name} is required for this scope.") : value;
 
-    private static string NormalizePath(string path)
-        => Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    private static bool IsPathUnderRoot(string path, string root)
+        => string.Equals(path, root, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizeComparablePath(string path)
+    {
+        var trimmed = path.Trim().TrimEnd('\\', '/');
+        if (IsWindowsFullyQualifiedPath(trimmed))
+        {
+            return char.ToUpperInvariant(trimmed[0]) + trimmed[1..].Replace('/', '\\');
+        }
+
+        return Path.GetFullPath(trimmed)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+    }
+
+    private static bool IsWindowsFullyQualifiedPath(string path)
+        => path.Length >= 3 &&
+            char.IsAsciiLetter(path[0]) &&
+            path[1] == ':' &&
+            (path[2] == '\\' || path[2] == '/');
 }

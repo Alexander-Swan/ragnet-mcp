@@ -73,13 +73,55 @@ public sealed class WorkspaceScopeResolverTests
             workspaces.Select(workspaceInfo => Normalize(workspaceInfo.RootPath)).ToArray());
     }
 
+    [Fact]
+    public async Task ResolveAsync_CurrentWorkspaceUsesRegistryForWindowsHostPath()
+    {
+        const string apiRoot = @"C:\Product\Api";
+        const string filePath = @"C:\Product\Api\src\Program.cs";
+        var resolver = CreateResolver(
+            detectedWorkspaceRoot: "/app/fallback",
+            groups: [],
+            indexedWorkspaces:
+            [
+                WorkspaceRecord(apiRoot)
+            ]);
+
+        var workspaces = await resolver.ResolveAsync(
+            filePath,
+            scope: null,
+            workspaceRoot: null,
+            workspaceGroup: null);
+
+        var resolved = Assert.Single(workspaces);
+        Assert.Equal(apiRoot, resolved.RootPath);
+        Assert.Equal("Api", resolved.Name);
+    }
+
     private static WorkspaceScopeResolver CreateResolver(
         string detectedWorkspaceRoot,
         params WorkspaceGroupRecord[] groups)
+        => CreateResolver(detectedWorkspaceRoot, groups, []);
+
+    private static WorkspaceScopeResolver CreateResolver(
+        string detectedWorkspaceRoot,
+        IReadOnlyList<WorkspaceGroupRecord> groups,
+        IReadOnlyList<IndexedWorkspaceRecord> indexedWorkspaces)
         => new(
             new FakeWorkspaceDetector(detectedWorkspaceRoot),
-            new FakeIndexedWorkspaceRegistry(),
+            new FakeIndexedWorkspaceRegistry(indexedWorkspaces),
             new FakeWorkspaceGroupRegistry(groups));
+
+    private static IndexedWorkspaceRecord WorkspaceRecord(string workspaceRoot)
+        => new IndexedWorkspaceRecord(
+            workspaceRoot,
+            "workspace-id",
+            "collection",
+            [],
+            [workspaceRoot],
+            DateTimeOffset.UtcNow,
+            FilesScanned: 1,
+            ChunksIndexed: 1,
+            FullReindex: false).WithCalculatedNames();
 
     private static string Normalize(string path)
         => Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -112,16 +154,16 @@ public sealed class WorkspaceScopeResolverTests
             : [Normalize(currentWorkspaceRoot)];
     }
 
-    private sealed class FakeIndexedWorkspaceRegistry : IIndexedWorkspaceRegistry
+    private sealed class FakeIndexedWorkspaceRegistry(IReadOnlyList<IndexedWorkspaceRecord> records) : IIndexedWorkspaceRegistry
     {
         public Task MarkIndexedAsync(IndexedWorkspaceRecord record, CancellationToken cancellationToken = default)
             => Task.CompletedTask;
 
         public Task<IReadOnlyList<string>> GetIndexedWorkspaceRootsAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult<IReadOnlyList<string>>([]);
+            => Task.FromResult<IReadOnlyList<string>>(records.Select(record => record.WorkspaceRoot).ToArray());
 
         public Task<IReadOnlyList<IndexedWorkspaceRecord>> GetIndexedWorkspacesAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult<IReadOnlyList<IndexedWorkspaceRecord>>([]);
+            => Task.FromResult(records);
 
         public Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default)
             => Task.CompletedTask;

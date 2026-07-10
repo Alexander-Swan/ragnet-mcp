@@ -27,6 +27,14 @@ public sealed class QdrantVectorStore(
     private readonly HttpClient _httpClient = httpClient;
 
     public async Task UpsertAsync(string workspaceRoot, IReadOnlyList<CodeChunk> chunks, IReadOnlyList<float[]> embeddings, CancellationToken cancellationToken = default)
+        => await UpsertAsync(
+            workspaceRoot,
+            QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot),
+            chunks,
+            embeddings,
+            cancellationToken);
+
+    public async Task UpsertAsync(string workspaceRoot, string collectionName, IReadOnlyList<CodeChunk> chunks, IReadOnlyList<float[]> embeddings, CancellationToken cancellationToken = default)
     {
         if (chunks.Count != embeddings.Count)
         {
@@ -50,9 +58,12 @@ public sealed class QdrantVectorStore(
         }
 
         var workspaceId = QdrantCollectionNaming.GetWorkspaceId(workspaceRoot);
-        var collectionName = QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot);
         await EnsureCollectionAsync(collectionName, vectorSize, cancellationToken);
 
+        // TODO: Add a configurable Qdrant bulk-load mode that temporarily lowers
+        // optimizer indexing_threshold for staging collections, then restores it
+        // after the load. Keep this behind config because older Qdrant versions
+        // and non-Qdrant test stores do not all support the same PATCH contract.
         foreach (var batchIndexes in Enumerable.Range(0, chunks.Count).Chunk(GetUpsertBatchSize()))
         {
             var points = batchIndexes.Select(index => new
@@ -81,13 +92,19 @@ public sealed class QdrantVectorStore(
         => await DeleteByFilesAsync(workspaceRoot, [filePath], cancellationToken);
 
     public async Task DeleteByFilesAsync(string workspaceRoot, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default)
+        => await DeleteByFilesAsync(
+            workspaceRoot,
+            QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot),
+            filePaths,
+            cancellationToken);
+
+    public async Task DeleteByFilesAsync(string workspaceRoot, string collectionName, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default)
     {
         if (filePaths.Count == 0)
         {
             return;
         }
 
-        var collectionName = QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot);
         if (!await CollectionExistsAsync(collectionName, cancellationToken))
         {
             return;
@@ -148,13 +165,33 @@ public sealed class QdrantVectorStore(
         string? contentType = null,
         string? indexProfile = null,
         CancellationToken cancellationToken = default)
+        => await SearchAsync(
+            workspaceRoot,
+            QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot),
+            embedding,
+            query,
+            limit,
+            hybrid,
+            contentType,
+            indexProfile,
+            cancellationToken);
+
+    public async Task<IReadOnlyList<SearchResult>> SearchAsync(
+        string workspaceRoot,
+        string collectionName,
+        float[] embedding,
+        string query,
+        int limit,
+        bool hybrid,
+        string? contentType = null,
+        string? indexProfile = null,
+        CancellationToken cancellationToken = default)
     {
         if (embedding.Length == 0)
         {
             return [];
         }
 
-        var collectionName = QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot);
         if (!await CollectionExistsAsync(collectionName, cancellationToken))
         {
             return [];
@@ -453,6 +490,18 @@ internal static partial class QdrantCollectionNaming
         }
 
         return $"{prefix}-{GetWorkspaceId(workspaceRoot)}";
+    }
+
+    public static string GetStagingCollectionName(string collectionPrefix, string workspaceRoot, DateTimeOffset createdAtUtc)
+    {
+        var prefix = SanitizeCollectionPart(collectionPrefix);
+        if (string.IsNullOrWhiteSpace(prefix))
+        {
+            prefix = "ragnet";
+        }
+
+        var name = $"{prefix}-{GetWorkspaceId(workspaceRoot)}-stage-{createdAtUtc:yyyyMMddHHmmssfff}-{Guid.NewGuid():N}";
+        return name.Length <= 63 ? name : name[..63].Trim('-', '_', '.');
     }
 
     public static string GetWorkspaceId(string workspaceRoot)

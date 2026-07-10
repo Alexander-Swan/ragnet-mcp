@@ -11,6 +11,13 @@ public sealed class WorkspaceDetector : IWorkspaceDetector
             throw new ArgumentException("A file path or workspace path is required.", nameof(filePath));
         }
 
+        if (!OperatingSystem.IsWindows() && IsWindowsFullyQualifiedPath(filePath.Trim()))
+        {
+            throw new InvalidOperationException(
+                $"Path '{filePath}' looks like a Windows host path, but RagNet MCP is running on a non-Windows filesystem. " +
+                "Use the local ragnet-indexer executable for host-path indexing, or mount/sync the workspace into the container and pass the container-visible path.");
+        }
+
         var fullPath = Path.GetFullPath(filePath);
         var directory = Directory.Exists(fullPath)
             ? new DirectoryInfo(fullPath)
@@ -55,4 +62,10 @@ public sealed class WorkspaceDetector : IWorkspaceDetector
         var rootName = new DirectoryInfo(root).Name;
         return Task.FromResult(new WorkspaceInfo(root, rootName, nearestSolution, nearestProject));
     }
+
+    private static bool IsWindowsFullyQualifiedPath(string path)
+        => path.Length >= 3 &&
+            char.IsAsciiLetter(path[0]) &&
+            path[1] == ':' &&
+            (path[2] == '\\' || path[2] == '/');
 }

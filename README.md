@@ -136,7 +136,7 @@ The current implementation indexes C# files through Roslyn, stores embeddings an
 
 Agents can use `trigger_indexing` as the generic indexing entry point. Pass `workspace_path` to index one workspace, or `workspace_group` to index a configured multi-project product. The older `index_workspace` and `index_workspace_group` tools remain available as explicit lower-level variants.
 
-In the default Hybrid setup, `ragnet-mcp` runs in Docker. Use MCP indexing tools only for paths visible inside that container. For ordinary local host paths, use `bin\ragnet-indexer.exe`; it writes to the same Qdrant collections used by MCP search.
+In the default Hybrid setup, `ragnet-mcp` runs in Docker. Use MCP indexing tools only for paths visible inside that container. For ordinary local host paths, use `bin\ragnet-indexer.exe`; it writes to the same Qdrant collections used by MCP search. After a Windows workspace has been indexed locally, Docker-hosted MCP search can still accept Windows `file_path` values for that indexed workspace because search resolves them through the Qdrant workspace registry instead of treating `C:\...` as a Linux path.
 
 Indexing and search support conservative profiles: `all`, `code`, `docs`, `metadata`, `frontend`, and `tests`. Use `index_profile` to update one profile at a time, and `search_profile` to constrain `search_code` or `hybrid_search` results. `all` is the default.
 
@@ -453,13 +453,14 @@ This is written to `.vscode/mcp.json`.
 
 ## GitHub Copilot CLI
 
-GitHub Copilot CLI registration is user-local when a compatible CLI is installed:
+GitHub Copilot CLI registration is user-local and writes MCP config directly:
 
 ```powershell
 .\scripts\register-copilot-cli.ps1
 ```
 
-The main registration script calls this automatically unless `-SkipCopilotCli` is passed. The helper probes `copilot mcp` first and then `gh copilot mcp`, because Copilot CLI packaging differs by installation channel.
+The main registration script calls this automatically unless `-SkipCopilotCli` is passed.
+The default config path is `%USERPROFILE%\.copilot\mcp.json`; set `COPILOT_MCP_CONFIG` or pass `-ConfigPath` if your Copilot CLI build reads a different file.
 
 ## Codex and Codex CLI
 

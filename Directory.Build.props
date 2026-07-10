@@ -1,5 +1,5 @@
 <Project>
   <PropertyGroup>
-    <DefaultItemExcludes>$(DefaultItemExcludes);**\artifacts\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\artifacts\**;**/artifacts/**;**\bin\**;**/bin/**;**\obj\**;**/obj/**</DefaultItemExcludes>
   </PropertyGroup>
 </Project>

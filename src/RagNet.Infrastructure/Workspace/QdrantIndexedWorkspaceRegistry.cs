@@ -25,6 +25,7 @@ public sealed class QdrantIndexedWorkspaceRegistry(
 
     public async Task MarkIndexedAsync(IndexedWorkspaceRecord record, CancellationToken cancellationToken = default)
     {
+        record = record.WithCalculatedNames();
         var collectionName = GetRegistryCollectionName();
         await EnsureCollectionAsync(collectionName, cancellationToken);
 
@@ -46,6 +47,8 @@ public sealed class QdrantIndexedWorkspaceRegistry(
                             collection_name = record.CollectionName,
                             groups = record.Groups,
                             indexed_targets = record.IndexedTargets.Select(NormalizePath).ToArray(),
+                            display_name = record.DisplayName,
+                            aliases = record.Aliases ?? [],
                             repository_root = NormalizeNullablePath(record.RepositoryRoot),
                             repository_relative_workspace_root = record.RepositoryRelativeWorkspaceRoot,
                             remote_url = record.RemoteUrl,
@@ -226,7 +229,9 @@ public sealed class QdrantIndexedWorkspaceRegistry(
             NullIfWhiteSpace(GetString(payload, "remote_url")),
             NullIfWhiteSpace(GetString(payload, "branch")),
             NullIfWhiteSpace(GetString(payload, "commit_sha")),
-            GetStringArray(payload, "indexed_target_relative_paths"));
+            GetStringArray(payload, "indexed_target_relative_paths"),
+            NullIfWhiteSpace(GetString(payload, "display_name")),
+            GetStringArray(payload, "aliases")).WithCalculatedNames();
         return true;
     }
 

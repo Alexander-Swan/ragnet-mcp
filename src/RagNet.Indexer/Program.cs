@@ -217,7 +217,7 @@ static async Task<int> RunAsync(
                 return 0;
             }
 
-            var workspace = Required(options, "workspace");
+            var workspace = await ResolveLocalWorkspaceTargetPathAsync(Required(options, "workspace"), workspaceRegistry);
             var workspaceStatus = await indexer.GetStatusAsync(workspace);
             Console.WriteLine(JsonSerializer.Serialize(workspaceStatus, jsonOptions));
             return 0;
@@ -225,13 +225,19 @@ static async Task<int> RunAsync(
 
         case "eval":
         {
+            var evalWorkspaceRoot = GetString(options, "workspace-root") ?? GetString(options, "workspace");
+            if (!string.IsNullOrWhiteSpace(evalWorkspaceRoot))
+            {
+                evalWorkspaceRoot = await ResolveLocalWorkspaceTargetPathAsync(evalWorkspaceRoot, workspaceRegistry);
+            }
+
             var result = await searchEvaluationService.RunAsync(new SearchEvaluationRequest(
                 Required(options, "queries"),
                 GetInt(options, "limit"),
                 GetNullableBool(options, "hybrid"),
                 GetString(options, "file-path"),
                 GetString(options, "scope"),
-                GetString(options, "workspace-root") ?? GetString(options, "workspace"),
+                evalWorkspaceRoot,
                 GetString(options, "workspace-group") ?? GetString(options, "group"),
                 GetString(options, "content-type"),
                 GetString(options, "retrieval-mode"),
@@ -346,6 +352,22 @@ static async Task<int> RunAsync(
                     return 0;
                 }
 
+                case "adopt":
+                case "recover":
+                {
+                    var workspaceRoot = GetString(options, "workspace-root") ??
+                        GetString(options, "workspace") ??
+                        (args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal) && !IsHelp(args[2])
+                            ? args[2]
+                            : null) ??
+                        throw new ArgumentException("--workspace-root is required.");
+                    Console.WriteLine(JsonSerializer.Serialize(await transferService.RecoverWorkspaceAsync(
+                        workspaceRoot,
+                        GetMany(options, "target"),
+                        GetString(options, "embedding-model")), jsonOptions));
+                    return 0;
+                }
+
                 case "collection":
                 case "collections":
                 {
@@ -359,7 +381,7 @@ static async Task<int> RunAsync(
                 }
 
                 default:
-                    throw new ArgumentException("Workspace command must be one of: collection, export, import, migrate.");
+                    throw new ArgumentException("Workspace command must be one of: adopt, collection, export, import, migrate, recover.");
             }
         }
 
@@ -428,7 +450,7 @@ static int GetOptionStart(string command, string[] args)
             return 3;
         }
 
-        if (action is "import" &&
+        if (action is "import" or "adopt" or "recover" &&
             args.Length > 2 &&
             !args[2].StartsWith("-", StringComparison.Ordinal) &&
             !IsHelp(args[2]))
@@ -672,7 +694,7 @@ static string ResolveIndexedWorkspaceTarget(string target, IReadOnlyList<Indexed
         !File.Exists(trimmed))
     {
         matches = indexedWorkspaces
-            .Where(workspace => string.Equals(Path.GetFileName(NormalizePath(workspace.WorkspaceRoot)), trimmed, StringComparison.OrdinalIgnoreCase))
+            .Where(workspace => IndexedWorkspaceRecordNames.MatchesAlias(workspace, trimmed))
             .ToArray();
     }
     else
@@ -760,7 +782,8 @@ static void WriteWorkspacesTable(IReadOnlyList<IndexedWorkspaceRecord> workspace
     var rows = workspaces
         .Select(workspace => new[]
         {
-            Path.GetFileName(workspace.WorkspaceRoot),
+            workspace.EffectiveDisplayName,
+            FormatAliases(workspace),
             workspace.WorkspaceRoot,
             workspace.Groups.Count == 0 ? "-" : string.Join(", ", workspace.Groups),
             workspace.IndexedTargets.Count.ToString(),
@@ -771,7 +794,16 @@ static void WriteWorkspacesTable(IReadOnlyList<IndexedWorkspaceRecord> workspace
         })
         .ToArray();
 
-    WriteTable(["Name", "Root", "Groups", "Targets", "Last Indexed", "Files", "Chunks", "Collection"], rows);
+    WriteTable(["Name", "Aliases", "Root", "Groups", "Targets", "Last Indexed", "Files", "Chunks", "Collection"], rows);
+}
+
+static string FormatAliases(IndexedWorkspaceRecord workspace)
+{
+    var aliases = workspace.EffectiveAliases
+        .Where(alias => !string.Equals(alias, workspace.EffectiveDisplayName, StringComparison.OrdinalIgnoreCase))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+    return aliases.Length == 0 ? "-" : string.Join(", ", aliases);
 }
 
 static void WriteTable(IReadOnlyList<string> headers, IReadOnlyList<IReadOnlyList<string>> rows)
@@ -850,19 +882,49 @@ static async Task<DeleteIndexedWorkspaceResult> DeleteIndexedWorkspaceAsync(
     IVectorStore vectorStore,
     IWorkspaceIndexStateStore stateStore)
 {
-    var workspaceRoot = NormalizePath(workspace);
-    var record = (await workspaceRegistry.GetIndexedWorkspacesAsync())
-        .FirstOrDefault(candidate => string.Equals(candidate.WorkspaceRoot, workspaceRoot, StringComparison.OrdinalIgnoreCase));
-    if (record is null)
-    {
-        throw new InvalidOperationException($"Indexed workspace '{workspaceRoot}' was not found in the workspace registry.");
-    }
+    var record = ResolveIndexedWorkspaceRecord(workspace, await workspaceRegistry.GetIndexedWorkspacesAsync());
 
     await vectorStore.DeleteWorkspaceAsync(record.WorkspaceRoot);
     await workspaceRegistry.DeleteWorkspaceAsync(record.WorkspaceRoot);
     await stateStore.DeleteAsync(record.WorkspaceRoot);
     Console.Error.WriteLine($"Deleted indexed workspace '{record.WorkspaceRoot}'.");
     return new DeleteIndexedWorkspaceResult(record.WorkspaceRoot, record.WorkspaceId, record.CollectionName);
+}
+
+static IndexedWorkspaceRecord ResolveIndexedWorkspaceRecord(
+    string workspace,
+    IReadOnlyList<IndexedWorkspaceRecord> indexedWorkspaces)
+{
+    var trimmed = workspace.Trim();
+    if (string.IsNullOrWhiteSpace(trimmed))
+    {
+        throw new ArgumentException("Workspace target cannot be empty.");
+    }
+
+    IndexedWorkspaceRecord[] matches;
+    if (!Path.IsPathFullyQualified(trimmed) &&
+        trimmed.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) < 0 &&
+        !Directory.Exists(trimmed) &&
+        !File.Exists(trimmed))
+    {
+        matches = indexedWorkspaces
+            .Where(record => IndexedWorkspaceRecordNames.MatchesAlias(record, trimmed))
+            .ToArray();
+    }
+    else
+    {
+        var workspaceRoot = NormalizePath(trimmed);
+        matches = indexedWorkspaces
+            .Where(record => string.Equals(NormalizePath(record.WorkspaceRoot), workspaceRoot, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+    }
+
+    return matches.Length switch
+    {
+        1 => matches[0],
+        0 => throw new InvalidOperationException($"Indexed workspace '{trimmed}' was not found in the workspace registry."),
+        _ => throw new InvalidOperationException($"Workspace name '{trimmed}' matches {matches.Length} indexed workspaces. Use a full workspace root.")
+    };
 }
 
 static IReadOnlyList<LocalWorkspaceGroup> LoadLocalWorkspaceGroups()
@@ -1091,7 +1153,7 @@ static async Task<string> ResolveLocalWorkspaceTargetPathAsync(
         !File.Exists(trimmed))
     {
         var matches = (await workspaceRegistry.GetIndexedWorkspacesAsync())
-            .Where(workspace => string.Equals(Path.GetFileName(NormalizePath(workspace.WorkspaceRoot)), trimmed, StringComparison.OrdinalIgnoreCase))
+            .Where(workspace => IndexedWorkspaceRecordNames.MatchesAlias(workspace, trimmed))
             .ToArray();
 
         return matches.Length switch
@@ -1124,6 +1186,7 @@ static void WriteHelp()
       workspace   collection [--workspace <path-or-name>|--group <name>|--path <file-or-directory>]
       workspace   export <indexed-name-or-root> --output <directory>
       workspace   import --input <directory> [--workspace-root <new-root>|--path-map <exported-root=new-root> ...]
+      workspace   recover <workspace-root> [--target <indexed-target> ...] [--embedding-model <model>]
       workspace   migrate
       group       export <name> --output <directory>
       group       import --input <directory> --path-map <exported-root=new-root> [...]
@@ -1149,6 +1212,8 @@ static void WriteHelp()
       --input         Import directory containing ragnet-export-manifest.json.
       --workspace-root New local root when importing a single exported workspace.
       --path-map      Import remap from exported root to local root. Repeat for multi-workspace exports.
+      --target        Indexed target to record when recovering an existing Qdrant collection. Repeat for solution/product scopes.
+      --embedding-model Embedding model to record when recovering index state. Defaults to configured RagNet:Ollama:EmbeddingModel.
 
     Examples:
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln
@@ -1166,6 +1231,7 @@ static void WriteHelp()
       ragnet-indexer workspace export Api --output D:\Backups\ragnet-api
       ragnet-indexer group export my-product --output D:\Backups\ragnet-product
       ragnet-indexer workspace import --input D:\Backups\ragnet-api --workspace-root E:\Repos\Product\Api
+      ragnet-indexer workspace recover E:\Repos\Product\Api --target E:\Repos\Product\Api\Api.sln
       ragnet-indexer group import D:\Backups\ragnet-product --path-map D:\Work\Product=E:\Repos\Product
       ragnet-indexer workspace migrate
       ragnet-indexer eval --queries eval.json --workspace-root D:\Work\Product\Api --limit 10 --hybrid
@@ -1181,14 +1247,14 @@ static void WriteProgress(IndexingProgress progress)
 {
     var count = progress.Total.HasValue
         ? $"{progress.Current}/{progress.Total.Value}"
-        : progress.Current.ToString();
+        : $"{progress.Current}/-";
     var workspaceName = Path.GetFileName(progress.WorkspaceRoot);
     if (string.IsNullOrWhiteSpace(workspaceName))
     {
         workspaceName = progress.WorkspaceRoot;
     }
 
-    Console.Error.WriteLine($"{DateTimeOffset.Now:HH:mm:ss} [{workspaceName}] {progress.Stage}: {count} - {progress.Message}");
+    Console.Error.WriteLine($"{DateTimeOffset.Now:HH:mm:ss} {workspaceName} {progress.Message} {count}");
 }
 
 sealed record LocalWorkspaceGroupStore(IReadOnlyList<LocalWorkspaceGroup> Groups);

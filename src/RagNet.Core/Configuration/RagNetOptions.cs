@@ -45,14 +45,21 @@ public sealed class WorkspaceOptions
 
     public IReadOnlyList<string> ExcludeDirectories { get; init; } =
     [
+        ".agents",
+        ".codex",
+        ".dotnet-home",
         ".git",
         ".ragnet",
         ".vs",
         ".vscode",
+        "artifacts",
         "bin",
+        "coverage",
+        "dist",
         "obj",
         "node_modules",
-        "packages"
+        "packages",
+        "TestResults"
     ];
 
     public IReadOnlyList<string> ExcludeFilePatterns { get; init; } =

@@ -9,10 +9,13 @@ public sealed class InMemoryVectorStore : IVectorStore
     private readonly Dictionary<string, List<Entry>> _entriesByWorkspace = new(StringComparer.OrdinalIgnoreCase);
 
     public Task UpsertAsync(string workspaceRoot, IReadOnlyList<CodeChunk> chunks, IReadOnlyList<float[]> embeddings, CancellationToken cancellationToken = default)
+        => UpsertAsync(workspaceRoot, workspaceRoot, chunks, embeddings, cancellationToken);
+
+    public Task UpsertAsync(string workspaceRoot, string collectionName, IReadOnlyList<CodeChunk> chunks, IReadOnlyList<float[]> embeddings, CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            var entries = _entriesByWorkspace.GetValueOrDefault(workspaceRoot) ?? [];
+            var entries = _entriesByWorkspace.GetValueOrDefault(collectionName) ?? [];
             entries.RemoveAll(entry => chunks.Any(chunk => chunk.Id == entry.Chunk.Id));
 
             for (var index = 0; index < chunks.Count; index++)
@@ -20,7 +23,7 @@ public sealed class InMemoryVectorStore : IVectorStore
                 entries.Add(new Entry(chunks[index], embeddings[index]));
             }
 
-            _entriesByWorkspace[workspaceRoot] = entries;
+            _entriesByWorkspace[collectionName] = entries;
         }
 
         return Task.CompletedTask;
@@ -30,6 +33,9 @@ public sealed class InMemoryVectorStore : IVectorStore
         => DeleteByFilesAsync(workspaceRoot, [filePath], cancellationToken);
 
     public Task DeleteByFilesAsync(string workspaceRoot, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default)
+        => DeleteByFilesAsync(workspaceRoot, workspaceRoot, filePaths, cancellationToken);
+
+    public Task DeleteByFilesAsync(string workspaceRoot, string collectionName, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default)
     {
         if (filePaths.Count == 0)
         {
@@ -38,7 +44,7 @@ public sealed class InMemoryVectorStore : IVectorStore
 
         lock (_gate)
         {
-            if (_entriesByWorkspace.TryGetValue(workspaceRoot, out var entries))
+            if (_entriesByWorkspace.TryGetValue(collectionName, out var entries))
             {
                 var files = filePaths.Select(NormalizePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 entries.RemoveAll(entry => files.Contains(NormalizePath(entry.Chunk.FilePath)));
@@ -67,11 +73,23 @@ public sealed class InMemoryVectorStore : IVectorStore
         string? contentType = null,
         string? indexProfile = null,
         CancellationToken cancellationToken = default)
+        => SearchAsync(workspaceRoot, workspaceRoot, embedding, query, limit, hybrid, contentType, indexProfile, cancellationToken);
+
+    public Task<IReadOnlyList<SearchResult>> SearchAsync(
+        string workspaceRoot,
+        string collectionName,
+        float[] embedding,
+        string query,
+        int limit,
+        bool hybrid,
+        string? contentType = null,
+        string? indexProfile = null,
+        CancellationToken cancellationToken = default)
     {
         List<Entry> entries;
         lock (_gate)
         {
-            entries = _entriesByWorkspace.GetValueOrDefault(workspaceRoot)?.ToList() ?? [];
+            entries = _entriesByWorkspace.GetValueOrDefault(collectionName)?.ToList() ?? [];
         }
 
         var normalizedContentType = NormalizeContentType(contentType);

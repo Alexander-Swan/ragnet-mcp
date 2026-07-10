@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
@@ -153,6 +154,17 @@ public sealed class QdrantWorkspaceTransferService(
                         .Select(relativePath => relativePath!)
                         .ToArray()
                 }, cancellationToken);
+
+                var state = await stateStore.LoadAsync(workspace.WorkspaceRoot, cancellationToken);
+                if (state.StateExists && !string.Equals(state.SchemaVersion, IndexSchemaVersions.CurrentText, StringComparison.Ordinal))
+                {
+                    await stateStore.SaveAsync(state with
+                    {
+                        SchemaVersion = IndexSchemaVersions.CurrentText,
+                        StateExists = true
+                    }, cancellationToken);
+                }
+
                 updated++;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
@@ -162,6 +174,111 @@ public sealed class QdrantWorkspaceTransferService(
         }
 
         return new WorkspaceMigrationResult(workspaces.Count, updated, warnings);
+    }
+
+    public async Task<WorkspaceRecoveryResult> RecoverWorkspaceAsync(
+        string workspaceRoot,
+        IReadOnlyList<string>? indexedTargets = null,
+        string? embeddingModel = null,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedRoot = NormalizePath(workspaceRoot);
+        var collectionName = QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, normalizedRoot);
+        if (!await CollectionExistsAsync(collectionName, cancellationToken))
+        {
+            throw new InvalidOperationException($"Qdrant collection '{collectionName}' was not found for workspace '{normalizedRoot}'.");
+        }
+
+        var warnings = new List<string>();
+        var recovered = new Dictionary<string, RecoveredFileAccumulator>(StringComparer.OrdinalIgnoreCase);
+        var pointsScanned = 0;
+        await foreach (var payload in ScrollPayloadsAsync(collectionName, cancellationToken))
+        {
+            pointsScanned++;
+            var filePath = GetString(payload, "file_path");
+            if (string.IsNullOrWhiteSpace(filePath))
+            {
+                continue;
+            }
+
+            var normalizedFile = NormalizePath(filePath);
+            if (!IsPathUnderRoot(normalizedFile, normalizedRoot))
+            {
+                warnings.Add($"Skipped payload outside workspace root: {normalizedFile}");
+                continue;
+            }
+
+            if (!recovered.TryGetValue(normalizedFile, out var file))
+            {
+                file = new RecoveredFileAccumulator(normalizedFile);
+                recovered[normalizedFile] = file;
+            }
+
+            file.ChunkCount++;
+        }
+
+        var states = new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase);
+        var missing = 0;
+        foreach (var file in recovered.Values.OrderBy(file => file.FilePath, StringComparer.OrdinalIgnoreCase))
+        {
+            if (!File.Exists(file.FilePath))
+            {
+                missing++;
+                warnings.Add($"Indexed file no longer exists locally and could not be added to state: {file.FilePath}");
+                continue;
+            }
+
+            var state = ComputeIndexedFileState(file.FilePath, file.ChunkCount);
+            states[state.FilePath] = state;
+        }
+
+        var targets = (indexedTargets is { Count: > 0 } ? indexedTargets : [normalizedRoot])
+            .Select(NormalizePath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var savedAt = DateTimeOffset.UtcNow;
+        var model = string.IsNullOrWhiteSpace(embeddingModel)
+            ? _options.Ollama.EmbeddingModel
+            : embeddingModel;
+        await stateStore.SaveAsync(new WorkspaceIndexState(
+            normalizedRoot,
+            states,
+            model,
+            IndexSchemaVersions.CurrentText,
+            savedAt,
+            StateExists: true), cancellationToken);
+
+        var identity = await sourceIdentityResolver.ResolveAsync(normalizedRoot, normalizedRoot, cancellationToken);
+        await workspaceRegistry.MarkIndexedAsync(new IndexedWorkspaceRecord(
+            normalizedRoot,
+            QdrantCollectionNaming.GetWorkspaceId(normalizedRoot),
+            collectionName,
+            [],
+            targets,
+            savedAt,
+            states.Count,
+            states.Values.Sum(file => file.ChunkCount),
+            FullReindex: false,
+            identity.RepositoryRoot,
+            GetRelativePathOrNull(identity.RepositoryRoot, normalizedRoot),
+            identity.RemoteUrl,
+            identity.Branch,
+            identity.CommitSha,
+            targets
+                .Select(target => GetRelativePathOrNull(identity.RepositoryRoot, target))
+                .Where(relativePath => !string.IsNullOrWhiteSpace(relativePath))
+                .Select(relativePath => relativePath!)
+                .ToArray()), cancellationToken);
+
+        return new WorkspaceRecoveryResult(
+            normalizedRoot,
+            QdrantCollectionNaming.GetWorkspaceId(normalizedRoot),
+            collectionName,
+            pointsScanned,
+            states.Count,
+            missing,
+            targets,
+            warnings);
     }
 
     public async Task<WorkspaceCollectionStatusResult> ResolveCollectionsAsync(
@@ -446,7 +563,7 @@ public sealed class QdrantWorkspaceTransferService(
             })
             .ToArray();
 
-        return record with
+        return (record with
         {
             WorkspaceRoot = newWorkspaceRoot,
             WorkspaceId = QdrantCollectionNaming.GetWorkspaceId(newWorkspaceRoot),
@@ -458,8 +575,10 @@ public sealed class QdrantWorkspaceTransferService(
                 .Select(target => GetRelativePathOrNull(newWorkspaceRoot, target))
                 .Where(relativePath => !string.IsNullOrWhiteSpace(relativePath))
                 .Select(relativePath => relativePath!)
-                .ToArray()
-        };
+                .ToArray(),
+            DisplayName = null,
+            Aliases = null
+        }).WithCalculatedNames();
     }
 
     private async Task<IndexedWorkspaceRecord> ResolveWorkspaceRecordAsync(string workspace, CancellationToken cancellationToken)
@@ -473,7 +592,7 @@ public sealed class QdrantWorkspaceTransferService(
             !File.Exists(trimmed))
         {
             matches = records
-                .Where(record => string.Equals(Path.GetFileName(NormalizePath(record.WorkspaceRoot)), trimmed, StringComparison.OrdinalIgnoreCase))
+                .Where(record => IndexedWorkspaceRecordNames.MatchesAlias(record, trimmed))
                 .ToArray();
         }
         else
@@ -525,6 +644,61 @@ public sealed class QdrantWorkspaceTransferService(
         return new QdrantCollectionInfo(vectorSize);
     }
 
+    private async IAsyncEnumerable<JsonElement> ScrollPayloadsAsync(
+        string collectionName,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        JsonElement? offset = null;
+        do
+        {
+            var body = new Dictionary<string, object?>
+            {
+                ["limit"] = ScrollLimit,
+                ["with_payload"] = true,
+                ["with_vector"] = false
+            };
+            if (offset is not null)
+            {
+                body["offset"] = offset.Value.Clone();
+            }
+
+            var response = await httpClient.PostAsJsonAsync(
+                $"collections/{Uri.EscapeDataString(collectionName)}/points/scroll",
+                body,
+                JsonOptions,
+                cancellationToken);
+            await EnsureSuccessAsync(response, $"scroll Qdrant collection '{collectionName}'", cancellationToken);
+
+            using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(responseStream, cancellationToken: cancellationToken);
+            var result = document.RootElement.GetProperty("result");
+            foreach (var point in result.GetProperty("points").EnumerateArray())
+            {
+                if (point.TryGetProperty("payload", out var payload))
+                {
+                    yield return payload.Clone();
+                }
+            }
+
+            offset = result.TryGetProperty("next_page_offset", out var nextOffset) && nextOffset.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined
+                ? nextOffset.Clone()
+                : null;
+        }
+        while (offset is not null);
+    }
+
+    private async Task<bool> CollectionExistsAsync(string collectionName, CancellationToken cancellationToken)
+    {
+        var response = await httpClient.GetAsync($"collections/{Uri.EscapeDataString(collectionName)}", cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+
+        await EnsureSuccessAsync(response, $"read Qdrant collection '{collectionName}'", cancellationToken);
+        return true;
+    }
+
     private static async Task<WorkspaceExportManifest> ReadManifestAsync(string inputDirectory, CancellationToken cancellationToken)
     {
         var manifestPath = Path.Combine(inputDirectory, ManifestFileName);
@@ -570,6 +744,24 @@ public sealed class QdrantWorkspaceTransferService(
         => payload.TryGetPropertyValue(name, out var value) && value is not null
             ? value.GetValue<string?>()
             : null;
+
+    private static string GetString(JsonElement payload, string name)
+        => payload.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : string.Empty;
+
+    private static IndexedFileState ComputeIndexedFileState(string filePath, int chunkCount)
+    {
+        var info = new FileInfo(filePath);
+        using var stream = File.OpenRead(filePath);
+        var hash = SHA256.HashData(stream);
+        return new IndexedFileState(
+            NormalizePath(filePath),
+            Convert.ToHexString(hash),
+            info.Length,
+            info.LastWriteTimeUtc,
+            chunkCount);
+    }
 
     private static string FromPortableRelativePath(string path)
         => path.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
@@ -654,4 +846,9 @@ public sealed class QdrantWorkspaceTransferService(
     private sealed record QdrantCollectionInfo(int VectorSize);
 
     private sealed record SourceIdentitySnapshot(string RepositoryRoot, string? RemoteUrl, string? Branch, string? CommitSha);
+
+    private sealed record RecoveredFileAccumulator(string FilePath)
+    {
+        public int ChunkCount { get; set; }
+    }
 }
