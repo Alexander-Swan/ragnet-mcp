@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Globalization;
 using System.Text.Json;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Configuration;
@@ -1302,6 +1303,8 @@ static class ProgressConsole
     private static readonly object ConsoleLock = new();
     private static int _spinnerIndex;
     private static int _lastLineLength;
+    private static string? _lastTemplate;
+    private static Timer? _spinnerTimer;
 
     public static void Write(IndexingProgress progress)
     {
@@ -1315,32 +1318,56 @@ static class ProgressConsole
             workspaceName = progress.WorkspaceRoot;
         }
 
-        var text = $"{DateTimeOffset.Now:HH:mm:ss} {NextSpinner()} {workspaceName} {progress.Message} {count}";
+        var template = $"{DateTimeOffset.Now:HH:mm:ss} {{0}} {workspaceName} {progress.Message} {count}";
         if (Console.IsErrorRedirected)
         {
-            Console.Error.WriteLine(text);
+            Console.Error.WriteLine(string.Format(CultureInfo.InvariantCulture, template, NextSpinner()));
             return;
         }
 
         lock (ConsoleLock)
         {
-            var line = FitToConsoleWidth(text);
-            Console.Error.Write('\r');
-            Console.Error.Write(line);
-            if (_lastLineLength > line.Length)
-            {
-                Console.Error.Write(new string(' ', _lastLineLength - line.Length));
-                Console.Error.Write('\r');
-                Console.Error.Write(line);
-            }
-
-            _lastLineLength = line.Length;
+            _lastTemplate = template;
+            EnsureSpinnerTimer();
+            RenderLineLocked(string.Format(CultureInfo.InvariantCulture, template, NextSpinner()));
             if (progress.Stage == IndexingProgressStage.Completed)
             {
                 Console.Error.WriteLine();
                 _lastLineLength = 0;
+                _lastTemplate = null;
             }
         }
+    }
+
+    private static void EnsureSpinnerTimer()
+    {
+        _spinnerTimer ??= new Timer(_ =>
+        {
+            lock (ConsoleLock)
+            {
+                if (_lastTemplate is null)
+                {
+                    return;
+                }
+
+                RenderLineLocked(string.Format(CultureInfo.InvariantCulture, _lastTemplate, NextSpinner()));
+            }
+        }, null, TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(250));
+    }
+
+    private static void RenderLineLocked(string text)
+    {
+        var line = FitToConsoleWidth(text);
+        Console.Error.Write('\r');
+        Console.Error.Write(line);
+        if (_lastLineLength > line.Length)
+        {
+            Console.Error.Write(new string(' ', _lastLineLength - line.Length));
+            Console.Error.Write('\r');
+            Console.Error.Write(line);
+        }
+
+        _lastLineLength = line.Length;
     }
 
     private static char NextSpinner()

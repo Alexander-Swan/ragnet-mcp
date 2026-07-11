@@ -720,7 +720,10 @@ public sealed class WorkspaceIndexerTests
             .ToArray();
 
         Assert.Equal((0, 3), embeddingProgress[0]);
-        Assert.Equal([1, 2, 3], embeddingProgress.Skip(1).Select(report => report.Current).Order().ToArray());
+        Assert.Equal(3, embeddingProgress.Max(report => report.Current));
+        Assert.Contains(embeddingProgress, report => report.Current == 1);
+        Assert.Contains(embeddingProgress, report => report.Current == 2);
+        Assert.Contains(embeddingProgress, report => report.Current == 3);
         Assert.All(embeddingProgress, report => Assert.Equal(3, report.Total));
     }
 

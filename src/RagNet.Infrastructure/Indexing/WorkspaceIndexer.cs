@@ -316,6 +316,15 @@ public sealed class WorkspaceIndexer(
                 Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzedFiles, totalChangedFiles, $"Analyzing {FormatProgressPath(workspaceRoot, file)}");
             }
 
+            if (batchChunks.Count == 0)
+            {
+                embeddedFiles += fileBatch.Length;
+                upsertedFiles += fileBatch.Length;
+                Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, embeddedFiles, totalChangedFiles, $"No embeddings through {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
+                Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, $"No vectors through {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
+                continue;
+            }
+
             var embeddedBatch = await CreateEmbeddingsAsync(
                 workspaceRoot,
                 batchChunks,
@@ -324,7 +333,7 @@ public sealed class WorkspaceIndexer(
                 progress: null,
                 reportStart: false);
             embeddedFiles += fileBatch.Length;
-            Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, embeddedFiles, totalChangedFiles, $"Creating embeddings for {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
+            Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, embeddedFiles, totalChangedFiles, $"Created embeddings through {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
 
             foreach (var pair in CountChunksByFile(embeddedBatch.Chunks))
             {
@@ -336,10 +345,11 @@ public sealed class WorkspaceIndexer(
             if (embeddedBatch.Chunks.Count == 0)
             {
                 upsertedFiles += fileBatch.Length;
-                Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, $"Writing vectors through {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
+                Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, $"No vectors through {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
                 continue;
             }
 
+            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, $"Writing vectors for {FormatBatchProgressPath(workspaceRoot, fileBatch)}");
             await vectorStore.UpsertAsync(
                 workspaceRoot,
                 targetCollectionName,
@@ -1847,6 +1857,18 @@ public sealed class WorkspaceIndexer(
 
     private static string FormatProgressPath(string workspaceRoot, string filePath)
         => GetRelativePathOrNull(workspaceRoot, filePath) ?? filePath;
+
+    private static string FormatBatchProgressPath(string workspaceRoot, IReadOnlyList<string> fileBatch)
+    {
+        if (fileBatch.Count == 0)
+        {
+            return "batch";
+        }
+
+        return fileBatch.Count == 1
+            ? FormatProgressPath(workspaceRoot, fileBatch[0])
+            : $"{FormatProgressPath(workspaceRoot, fileBatch[0])}..{FormatProgressPath(workspaceRoot, fileBatch[^1])}";
+    }
 
     private sealed record WorkspaceIndexTargetPlan(
         string WorkspaceRoot,

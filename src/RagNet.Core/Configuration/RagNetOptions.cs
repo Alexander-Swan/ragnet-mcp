@@ -84,7 +84,7 @@ public sealed class IndexingOptions
 {
     public int ChunkMaxChars { get; init; } = 30_000;
 
-    public int MaxFilesPerBatch { get; init; } = 64;
+    public int MaxFilesPerBatch { get; init; } = 16;
 
     public int MaxEmbeddingConcurrency { get; init; } = 4;
 
