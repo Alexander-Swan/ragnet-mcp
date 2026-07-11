@@ -41,6 +41,8 @@ By default, Hybrid setup prefers container services while the indexer runs local
 
 When setup starts Compose services, it writes generated Compose settings to a local `.env` file. That file controls the published MCP port, the MCP container's Qdrant URL, the MCP container's Ollama URL, and the embedding model, and is intentionally not committed. See `.env.example` for the supported keys.
 
+Generated Compose settings also include conservative resource limits: Qdrant defaults to `2` CPUs and `4g` RAM, Ollama to `4` CPUs and `8g` RAM with one loaded model, one parallel request, and a `30s` model keep-alive, and RagNet MCP to `1` CPU and `1g` RAM. If a machine becomes sluggish while RagNet is idle, check `docker stats` or `nerdctl stats`. If `ollama` is busy, lower `RAGNET_OLLAMA_CPUS` or `RAGNET_OLLAMA_KEEP_ALIVE`; if `qdrant` is busy after a large index, it is usually background segment optimization and can be capped with `RAGNET_QDRANT_CPUS`.
+
 ## Qdrant Persistence
 
 When setup manages Qdrant through Docker Compose, Qdrant data is stored in the named Docker volume `ragnet-mcp_qdrant_storage`. The volume survives container restarts, image rebuilds, and normal `docker compose up -d --build` runs. It is deleted by `docker compose down -v`, so do not use `-v` unless you intentionally want to remove indexed vectors, workspace registry records, groups, and index state.

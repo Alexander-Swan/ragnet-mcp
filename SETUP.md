@@ -52,6 +52,8 @@ If you already run Qdrant locally, no extra flag is needed. If you already run O
 
 When setup starts Docker Compose services, it writes generated Compose settings to a repo-local `.env` file. That file is ignored by git and contains the selected MCP localhost port, the MCP container's Qdrant URL, the MCP container's Ollama URL, and the embedding model. Use `.env.example` as the reference shape if you need to adjust Compose settings by hand.
 
+Setup also writes conservative container resource limits to `.env`: Qdrant defaults to `2` CPUs and `4g` RAM, Ollama to `4` CPUs and `8g` RAM with one loaded model, one parallel request, and a `30s` model keep-alive, and RagNet MCP to `1` CPU and `1g` RAM. If Docker/Rancher makes the machine sluggish while RagNet is idle, run `docker stats` or `nerdctl stats` to identify the busy container. If `ollama` is busy, lower `RAGNET_OLLAMA_CPUS` or `RAGNET_OLLAMA_KEEP_ALIVE`; if `qdrant` is busy after a large index, it is usually background segment optimization and can be capped with `RAGNET_QDRANT_CPUS`.
+
 When setup manages Qdrant through Compose, Qdrant stores vectors, payloads, workspace registry records, groups, and index state in the named Docker volume `ragnet-mcp_qdrant_storage`. The volume survives `docker compose restart`, container recreation, and image rebuilds. It is removed by `docker compose down -v`, which deletes the local RagNet index. Setup prints whether the volume exists after it starts or reuses Qdrant.
 
 Inspect the managed volume with:

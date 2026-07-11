@@ -238,7 +238,16 @@ function Write-ComposeEnvFile {
         "RAGNET_MCP_PORT=$McpPort",
         "RAGNET_QDRANT_BASE_URL=$QdrantBaseUrl",
         "RAGNET_OLLAMA_BASE_URL=$OllamaBaseUrl",
-        "RAGNET_EMBEDDING_MODEL=$EmbeddingModel"
+        "RAGNET_EMBEDDING_MODEL=$EmbeddingModel",
+        "RAGNET_QDRANT_CPUS=2",
+        "RAGNET_QDRANT_MEM_LIMIT=4g",
+        "RAGNET_OLLAMA_CPUS=4",
+        "RAGNET_OLLAMA_MEM_LIMIT=8g",
+        "RAGNET_OLLAMA_NUM_PARALLEL=1",
+        "RAGNET_OLLAMA_MAX_LOADED_MODELS=1",
+        "RAGNET_OLLAMA_KEEP_ALIVE=30s",
+        "RAGNET_MCP_CPUS=1",
+        "RAGNET_MCP_MEM_LIMIT=1g"
     )
 
     Set-Content -Path $envPath -Value $content -Encoding utf8
