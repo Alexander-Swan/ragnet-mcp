@@ -285,9 +285,6 @@ public sealed class QdrantWorkspaceGroupRegistry(
             return false;
         }
 
-        IndexSchemaVersions.EnsureCompatible(
-            IndexSchemaVersions.ReadPayloadVersion(payload),
-            $"Qdrant workspace group record '{name}'");
         group = new WorkspaceGroupRecord(
             name.Trim(),
             WorkspaceGroupSources.Shared,

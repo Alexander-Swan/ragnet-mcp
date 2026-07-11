@@ -211,9 +211,6 @@ public sealed class QdrantIndexedWorkspaceRegistry(
             return false;
         }
 
-        IndexSchemaVersions.EnsureCompatible(
-            IndexSchemaVersions.ReadPayloadVersion(payload),
-            $"Qdrant workspace registry record for '{workspaceRoot}'");
         record = new IndexedWorkspaceRecord(
             workspaceRoot,
             workspaceId,

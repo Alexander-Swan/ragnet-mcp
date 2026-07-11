@@ -114,6 +114,37 @@ public sealed class QdrantWorkspaceGroupRegistryTests
     }
 
     [Fact]
+    public async Task GetGroupsAsync_LoadsOlderSharedGroupSchemaRecords()
+    {
+        using var handler = new FakeQdrantHandler();
+        var root = Path.Combine(Path.GetTempPath(), "ragnet-v1-group");
+        handler.Enqueue(HttpStatusCode.OK, """{"result":{"status":"green"}}""");
+        handler.Enqueue(HttpStatusCode.OK, $$"""
+            {
+              "result": {
+                "points": [
+                  {
+                    "payload": {
+                      "group_name": "Legacy",
+                      "schema_version": 1,
+                      "roots": [ {{JsonSerializer.Serialize(root)}} ],
+                      "exclude_directories": [ "bin" ]
+                    }
+                  }
+                ]
+              }
+            }
+            """);
+        var registry = CreateRegistry(handler);
+
+        var group = Assert.Single(await registry.GetGroupsAsync());
+
+        Assert.Equal("Legacy", group.Name);
+        Assert.Equal(WorkspaceGroupSources.Shared, group.Source);
+        Assert.Equal("bin", Assert.Single(group.ExcludeDirectories));
+    }
+
+    [Fact]
     public async Task SaveAndDeleteRejectConfiguredReadOnlyGroup()
     {
         using var handler = new FakeQdrantHandler();

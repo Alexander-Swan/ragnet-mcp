@@ -47,6 +47,44 @@ public sealed class QdrantIndexedWorkspaceRegistryTests
         Assert.Equal(IndexSchemaVersions.Current, payload.GetProperty("schema_version").GetInt32());
     }
 
+    [Fact]
+    public async Task GetIndexedWorkspacesAsync_LoadsOlderRegistrySchemaRecords()
+    {
+        using var handler = new FakeQdrantHandler();
+        var workspaceRoot = Path.Combine(Path.GetTempPath(), "ragnet-v1-registry");
+        var collectionName = QdrantCollectionNaming.GetCollectionName("test-prefix", workspaceRoot);
+        handler.Enqueue(HttpStatusCode.OK, """{"result":{"status":"green"}}""");
+        handler.Enqueue(HttpStatusCode.OK, $$"""
+            {
+              "result": {
+                "points": [
+                  {
+                    "payload": {
+                      "workspace_root": {{JsonSerializer.Serialize(workspaceRoot)}},
+                      "workspace_id": "{{QdrantCollectionNaming.GetWorkspaceId(workspaceRoot)}}",
+                      "schema_version": 1,
+                      "collection_name": "{{collectionName}}",
+                      "groups": [],
+                      "indexed_targets": [ {{JsonSerializer.Serialize(Path.Combine(workspaceRoot, "Api.sln"))}} ],
+                      "last_indexed_utc": "2026-07-09T12:00:00+00:00",
+                      "files_scanned": 1,
+                      "chunks_indexed": 2,
+                      "full_reindex": true
+                    }
+                  }
+                ]
+              }
+            }
+            """);
+        var registry = CreateRegistry(handler);
+
+        var record = Assert.Single(await registry.GetIndexedWorkspacesAsync());
+
+        Assert.Equal(Path.GetFullPath(workspaceRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), record.WorkspaceRoot);
+        Assert.Equal(collectionName, record.CollectionName);
+        Assert.Equal(2, record.ChunksIndexed);
+    }
+
     private static QdrantIndexedWorkspaceRegistry CreateRegistry(FakeQdrantHandler handler)
         => new(
             new HttpClient(handler)
