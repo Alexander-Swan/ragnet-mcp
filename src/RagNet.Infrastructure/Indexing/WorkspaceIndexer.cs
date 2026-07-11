@@ -36,6 +36,7 @@ public sealed class WorkspaceIndexer(
     private const int SearchCandidateMultiplier = 5;
     private const int MaxEmbeddingConcurrencyLimit = 16;
     private const int MaxEmbeddingBatchSizeLimit = 128;
+    private const int MaxFilesPerBatchLimit = 512;
     private static readonly Regex SolutionProjectRegex = new(
         "^Project\\(\"\\{[^}]+\\}\"\\)\\s*=\\s*\"[^\"]+\",\\s*\"([^\"]+)\"",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -176,6 +177,7 @@ public sealed class WorkspaceIndexer(
             indexProfile,
             modelResolution.SelectedModel,
             allowIncompatibleScopedState: false,
+            collectChunks: false,
             cancellationToken,
             progress);
         if (!string.IsNullOrWhiteSpace(modelResolution.Message))
@@ -198,22 +200,17 @@ public sealed class WorkspaceIndexer(
 
         Report(progress, workspaceRoot, IndexingProgressStage.DeletingVectors, filesToDelete.Length, filesToDelete.Length, "Deleting stale vectors.");
 
-        var embeddedBatch = await CreateEmbeddingsAsync(workspaceRoot, analysis.Chunks, analysis.Warnings, cancellationToken, progress);
-        var embeddedChunks = embeddedBatch.Chunks;
-        var embeddings = embeddedBatch.Embeddings;
-
-        if (embeddedChunks.Count > 0)
-        {
-            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, 0, embeddedChunks.Count, "Writing vectors to store.");
-            await vectorStore.UpsertAsync(workspaceRoot, targetCollectionName, embeddedChunks, embeddings, cancellationToken);
-            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, embeddedChunks.Count, embeddedChunks.Count, "Writing vectors to store.");
-        }
+        var streamedIndex = await AnalyzeEmbedAndUpsertChangedFilesAsync(
+            targetPlan,
+            analysis,
+            targetCollectionName,
+            cancellationToken,
+            progress);
 
         Report(progress, workspaceRoot, IndexingProgressStage.SavingState, 0, null, "Saving index state.");
-        var embeddedChunkCountsByFile = CountChunksByFile(embeddedChunks);
         var currentFilesWithChunkCounts = ApplyChunkCounts(
             analysis.CurrentFiles,
-            embeddedChunkCountsByFile,
+            streamedIndex.EmbeddedChunkCountsByFile,
             analysis.PreviousState.Files);
         var filesToSave = analysis.MergeScopedState
             ? analysis.PreviousState.Files
@@ -223,7 +220,7 @@ public sealed class WorkspaceIndexer(
                 .ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
             : currentFilesWithChunkCounts;
         var totalChunksIndexed = SumChunkCounts(filesToSave);
-        if (totalChunksIndexed == 0 && embeddedChunks.Count == 0)
+        if (totalChunksIndexed == 0 && streamedIndex.ChunksEmbedded == 0)
         {
             totalChunksIndexed = await GetPreviousRegistryChunkCountAsync(workspaceRoot, cancellationToken);
         }
@@ -258,14 +255,103 @@ public sealed class WorkspaceIndexer(
                 .Select(relativePath => relativePath!)
                 .ToArray()), cancellationToken);
 
-        Report(progress, workspaceRoot, IndexingProgressStage.Completed, embeddedChunks.Count, analysis.Chunks.Count, "Indexing completed.");
+        Report(progress, workspaceRoot, IndexingProgressStage.Completed, streamedIndex.ChunksEmbedded, null, "Indexing completed.");
         return new IndexWorkspaceResult(
             workspaceRoot,
             analysis.FilesScanned,
-            embeddedChunks.Count,
+            streamedIndex.ChunksEmbedded,
             analysis.FullReindex,
             analysis.Warnings,
             totalChunksIndexed);
+    }
+
+    private async Task<StreamedIndexResult> AnalyzeEmbedAndUpsertChangedFilesAsync(
+        WorkspaceIndexTargetPlan targetPlan,
+        WorkspaceIndexAnalysis analysis,
+        string targetCollectionName,
+        CancellationToken cancellationToken,
+        IProgress<IndexingProgress>? progress)
+    {
+        var workspaceRoot = targetPlan.WorkspaceRoot;
+        var chunkCountsByFile = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var analyzedFiles = 0;
+        var embeddedFiles = 0;
+        var upsertedFiles = 0;
+        var embeddedChunks = 0;
+        var totalChangedFiles = analysis.ChangedFiles.Count;
+
+        Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, 0, totalChangedFiles, "Analyzing changed files.");
+        Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, 0, totalChangedFiles, "Creating embeddings.");
+        Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, 0, totalChangedFiles, "Writing vectors to store.");
+
+        foreach (var fileBatch in analysis.ChangedFiles.Chunk(GetMaxFilesPerBatch()))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var batchChunks = new List<CodeChunk>();
+
+            foreach (var file in fileBatch)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var analyzer = await SelectAnalyzerAsync(workspaceRoot, file, cancellationToken);
+                if (analyzer is not null)
+                {
+                    try
+                    {
+                        var fileChunks = (await analyzer.AnalyzeAsync(workspaceRoot, file, cancellationToken))
+                            .Select(chunk => chunk with
+                            {
+                                Source = analysis.SourceIdentity.ForFile(chunk.FilePath),
+                                IndexProfile = GetIndexProfile(chunk.FilePath, chunk.ContentType)
+                            })
+                            .ToArray();
+                        batchChunks.AddRange(fileChunks);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        analysis.Warnings.Add($"{file}: {ex.Message}");
+                    }
+                }
+
+                analyzedFiles++;
+                Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzedFiles, totalChangedFiles, "Analyzing changed files.");
+            }
+
+            var embeddedBatch = await CreateEmbeddingsAsync(
+                workspaceRoot,
+                batchChunks,
+                analysis.Warnings,
+                cancellationToken,
+                progress: null,
+                reportStart: false);
+            embeddedFiles += fileBatch.Length;
+            Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, embeddedFiles, totalChangedFiles, "Creating embeddings.");
+
+            foreach (var pair in CountChunksByFile(embeddedBatch.Chunks))
+            {
+                chunkCountsByFile[pair.Key] = chunkCountsByFile.TryGetValue(pair.Key, out var existing)
+                    ? existing + pair.Value
+                    : pair.Value;
+            }
+
+            if (embeddedBatch.Chunks.Count == 0)
+            {
+                upsertedFiles += fileBatch.Length;
+                Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, "Writing vectors to store.");
+                continue;
+            }
+
+            await vectorStore.UpsertAsync(
+                workspaceRoot,
+                targetCollectionName,
+                embeddedBatch.Chunks,
+                embeddedBatch.Embeddings,
+                cancellationToken);
+            embeddedChunks += embeddedBatch.Chunks.Count;
+            upsertedFiles += fileBatch.Length;
+            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, "Writing vectors to store.");
+        }
+
+        return new StreamedIndexResult(chunkCountsByFile, embeddedChunks);
     }
 
     private async Task<EmbeddedChunkBatch> CreateEmbeddingsAsync(
@@ -273,13 +359,20 @@ public sealed class WorkspaceIndexer(
         IReadOnlyList<CodeChunk> chunks,
         List<string> warnings,
         CancellationToken cancellationToken,
-        IProgress<IndexingProgress>? progress)
+        IProgress<IndexingProgress>? progress,
+        int completedOffset = 0,
+        int? totalChunks = null,
+        bool reportStart = true)
     {
         var results = new EmbeddedChunk?[chunks.Count];
         var workItems = CreateEmbeddingWorkItems(chunks);
         var completed = 0;
         var warningLock = new object();
-        Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, 0, chunks.Count, "Creating embeddings.");
+        var progressTotal = totalChunks ?? (reportStart ? chunks.Count : null);
+        if (reportStart)
+        {
+            Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, completedOffset, progressTotal, "Creating embeddings.");
+        }
 
         await Parallel.ForEachAsync(
             workItems.Chunk(GetMaxEmbeddingBatchSize()),
@@ -297,8 +390,8 @@ public sealed class WorkspaceIndexer(
                     for (var index = 0; index < batch.Length; index++)
                     {
                         AssignEmbeddingResult(batch[index], embeddings[index], chunks, results);
-                        var current = Interlocked.Add(ref completed, batch[index].ChunkIndexes.Count);
-                        Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, current, chunks.Count, "Creating embeddings.");
+                        var current = completedOffset + Interlocked.Add(ref completed, batch[index].ChunkIndexes.Count);
+                        Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, current, progressTotal, "Creating embeddings.");
                     }
                 }
                 catch (EmbeddingModelNotFoundException)
@@ -309,8 +402,8 @@ public sealed class WorkspaceIndexer(
                 {
                     await EmbedBatchIndividuallyAsync(batch, chunks, results, warnings, warningLock, () =>
                     {
-                        var current = Interlocked.Add(ref completed, 1);
-                        Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, current, chunks.Count, "Creating embeddings.");
+                        var current = completedOffset + Interlocked.Add(ref completed, 1);
+                        Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, current, progressTotal, "Creating embeddings.");
                     }, token);
                 }
             });
@@ -336,6 +429,9 @@ public sealed class WorkspaceIndexer(
 
     private int GetMaxEmbeddingBatchSize()
         => Math.Clamp(_options.Indexing.MaxEmbeddingBatchSize, 1, MaxEmbeddingBatchSizeLimit);
+
+    private int GetMaxFilesPerBatch()
+        => Math.Clamp(_options.Indexing.MaxFilesPerBatch, 1, MaxFilesPerBatchLimit);
 
     private IReadOnlyList<EmbeddingWorkItem> CreateEmbeddingWorkItems(IReadOnlyList<CodeChunk> chunks)
     {
@@ -430,6 +526,7 @@ public sealed class WorkspaceIndexer(
             indexProfile,
             _options.Ollama.EmbeddingModel,
             allowIncompatibleScopedState: true,
+            collectChunks: true,
             cancellationToken,
             progress);
 
@@ -478,6 +575,7 @@ public sealed class WorkspaceIndexer(
         string indexProfile,
         string embeddingModel,
         bool allowIncompatibleScopedState,
+        bool collectChunks,
         CancellationToken cancellationToken,
         IProgress<IndexingProgress>? progress)
     {
@@ -581,35 +679,38 @@ public sealed class WorkspaceIndexer(
         var chunks = new List<CodeChunk>();
         var workspaceSourceIdentity = await sourceIdentityResolver.ResolveAsync(workspaceRoot, workspaceRoot, cancellationToken);
 
-        var analyzed = 0;
-        Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, 0, changedFiles.Length, "Analyzing changed files.");
-        foreach (var file in changedFiles)
+        if (collectChunks)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var analyzer = await SelectAnalyzerAsync(workspaceRoot, file, cancellationToken);
-            if (analyzer is null)
+            var analyzed = 0;
+            Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, 0, changedFiles.Length, "Analyzing changed files.");
+            foreach (var file in changedFiles)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                var analyzer = await SelectAnalyzerAsync(workspaceRoot, file, cancellationToken);
+                if (analyzer is null)
+                {
+                    analyzed++;
+                    Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzed, changedFiles.Length, "Analyzing changed files.");
+                    continue;
+                }
+
+                try
+                {
+                    chunks.AddRange((await analyzer.AnalyzeAsync(workspaceRoot, file, cancellationToken))
+                        .Select(chunk => chunk with
+                        {
+                            Source = workspaceSourceIdentity.ForFile(chunk.FilePath),
+                            IndexProfile = GetIndexProfile(chunk.FilePath, chunk.ContentType)
+                        }));
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    warnings.Add($"{file}: {ex.Message}");
+                }
+
                 analyzed++;
                 Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzed, changedFiles.Length, "Analyzing changed files.");
-                continue;
             }
-
-            try
-            {
-                chunks.AddRange((await analyzer.AnalyzeAsync(workspaceRoot, file, cancellationToken))
-                    .Select(chunk => chunk with
-                    {
-                        Source = workspaceSourceIdentity.ForFile(chunk.FilePath),
-                        IndexProfile = GetIndexProfile(chunk.FilePath, chunk.ContentType)
-                    }));
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                warnings.Add($"{file}: {ex.Message}");
-            }
-
-            analyzed++;
-            Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzed, changedFiles.Length, "Analyzing changed files.");
         }
 
         return new WorkspaceIndexAnalysis(
@@ -1841,6 +1942,10 @@ public sealed class WorkspaceIndexer(
     private sealed record EmbeddedChunk(CodeChunk Chunk, float[] Embedding);
 
     private sealed record EmbeddedChunkBatch(IReadOnlyList<CodeChunk> Chunks, IReadOnlyList<float[]> Embeddings);
+
+    private sealed record StreamedIndexResult(
+        IReadOnlyDictionary<string, int> EmbeddedChunkCountsByFile,
+        int ChunksEmbedded);
 
     private sealed record EmbeddingWorkItem(string CacheKey, string Content, List<int> ChunkIndexes);
 }

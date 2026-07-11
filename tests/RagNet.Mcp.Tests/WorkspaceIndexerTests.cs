@@ -365,6 +365,33 @@ public sealed class WorkspaceIndexerTests
     }
 
     [Fact]
+    public async Task IndexAsync_UpsertsEmbeddingsInConfiguredFileBatches()
+    {
+        using var workspace = new TemporaryWorkspace();
+        workspace.WriteFile("src/First.cs", "first");
+        workspace.WriteFile("src/Second.cs", "second");
+        workspace.WriteFile("src/Third.cs", "third");
+        var vectorStore = new FakeVectorStore();
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(State(workspace.RootPath)),
+            vectorStore,
+            new FakeAnalyzer(),
+            options: new RagNetOptions
+            {
+                Indexing = new IndexingOptions
+                {
+                    MaxFilesPerBatch = 1
+                }
+            });
+
+        await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal([1, 1, 1], vectorStore.UpsertBatchSizes);
+        Assert.Equal(3, vectorStore.UpsertedChunks.Count);
+    }
+
+    [Fact]
     public async Task IndexAsync_ReusesEmbeddingForDuplicateChunkContent()
     {
         using var workspace = new TemporaryWorkspace();
@@ -679,6 +706,7 @@ public sealed class WorkspaceIndexerTests
             {
                 Indexing = new IndexingOptions
                 {
+                    MaxFilesPerBatch = 1,
                     MaxEmbeddingConcurrency = 2,
                     MaxEmbeddingBatchSize = 1
                 }
@@ -1172,6 +1200,8 @@ public sealed class WorkspaceIndexerTests
 
         public List<float[]> UpsertedEmbeddings { get; } = [];
 
+        public List<int> UpsertBatchSizes { get; } = [];
+
         public string? LastUpsertCollectionName { get; private set; }
 
         public bool WorkspaceDeleted { get; private set; }
@@ -1207,6 +1237,7 @@ public sealed class WorkspaceIndexerTests
             }
 
             LastUpsertCollectionName = collectionName;
+            UpsertBatchSizes.Add(chunks.Count);
             UpsertedChunks.AddRange(chunks);
             UpsertedEmbeddings.AddRange(embeddings);
             return Task.CompletedTask;

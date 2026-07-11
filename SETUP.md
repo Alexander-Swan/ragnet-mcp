@@ -351,7 +351,7 @@ The indexer prints progress to stderr and writes index/status/delete results to 
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --no-progress
 ```
 
-Embedding requests run as concurrent Ollama batches while indexing. Tune concurrent batch count with `RagNet:Indexing:MaxEmbeddingConcurrency`, embedding batch size with `RagNet:Indexing:MaxEmbeddingBatchSize`, and Qdrant write size with `RagNet:Qdrant:UpsertBatchSize` in `appsettings.json` or an environment-specific override. Defaults are `4`, `16`, and `256`.
+Embedding requests run as concurrent Ollama batches while indexing. Tune file batch size with `RagNet:Indexing:MaxFilesPerBatch`, concurrent embedding batch count with `RagNet:Indexing:MaxEmbeddingConcurrency`, embedding batch size with `RagNet:Indexing:MaxEmbeddingBatchSize`, and Qdrant write size with `RagNet:Qdrant:UpsertBatchSize` in `appsettings.json` or an environment-specific override. Defaults are `64`, `4`, `16`, and `256`.
 
 Check index state:
 
