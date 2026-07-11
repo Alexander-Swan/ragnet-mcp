@@ -581,7 +581,7 @@ try {
 
         Test-ServicePorts $portChecks
         if ($dependencyServices.Count -gt 0) {
-            Invoke-Compose up -d @dependencyServices
+            Invoke-Compose -Arguments (@("up", "-d") + $dependencyServices)
         }
         Write-QdrantPersistenceInfo -UseQdrantContainer $useQdrantContainer
 
@@ -589,7 +589,7 @@ try {
             Pull-OllamaModels -UseContainer $useOllamaContainer
         }
 
-        Invoke-Compose up -d --build --no-deps ragnet-mcp
+        Invoke-Compose -Arguments @("up", "-d", "--build", "--no-deps", "ragnet-mcp")
         Publish-Indexer
     }
     elseif ($Mode -eq "Hybrid") {
@@ -612,12 +612,12 @@ try {
 
         Test-ServicePorts $portChecks
         if ($services.Count -gt 0) {
-            Invoke-Compose up -d @services
+            Invoke-Compose -Arguments (@("up", "-d") + $services)
         }
         Write-QdrantPersistenceInfo -UseQdrantContainer $useQdrantContainer
 
         Pull-OllamaModels -UseContainer $useOllamaContainer
-        Invoke-Compose up -d --build --no-deps ragnet-mcp
+        Invoke-Compose -Arguments @("up", "-d", "--build", "--no-deps", "ragnet-mcp")
 
         Publish-Indexer
     }
