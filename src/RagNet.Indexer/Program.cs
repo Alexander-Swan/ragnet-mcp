@@ -1298,6 +1298,10 @@ sealed record QdrantCollectionListItem(string Name);
 static class ProgressConsole
 {
     private static readonly ConcurrentDictionary<string, int> Sequences = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly char[] SpinnerFrames = ['|', '/', '-', '\\'];
+    private static readonly object ConsoleLock = new();
+    private static int _spinnerIndex;
+    private static int _lastLineLength;
 
     public static void Write(IndexingProgress progress)
     {
@@ -1311,7 +1315,56 @@ static class ProgressConsole
             workspaceName = progress.WorkspaceRoot;
         }
 
-        Console.Error.WriteLine($"{DateTimeOffset.Now:HH:mm:ss} {workspaceName} {progress.Message} {count}");
+        var text = $"{DateTimeOffset.Now:HH:mm:ss} {NextSpinner()} {workspaceName} {progress.Message} {count}";
+        if (Console.IsErrorRedirected)
+        {
+            Console.Error.WriteLine(text);
+            return;
+        }
+
+        lock (ConsoleLock)
+        {
+            var line = FitToConsoleWidth(text);
+            Console.Error.Write('\r');
+            Console.Error.Write(line);
+            if (_lastLineLength > line.Length)
+            {
+                Console.Error.Write(new string(' ', _lastLineLength - line.Length));
+                Console.Error.Write('\r');
+                Console.Error.Write(line);
+            }
+
+            _lastLineLength = line.Length;
+            if (progress.Stage == IndexingProgressStage.Completed)
+            {
+                Console.Error.WriteLine();
+                _lastLineLength = 0;
+            }
+        }
+    }
+
+    private static char NextSpinner()
+    {
+        var index = Interlocked.Increment(ref _spinnerIndex) - 1;
+        return SpinnerFrames[index % SpinnerFrames.Length];
+    }
+
+    private static string FitToConsoleWidth(string text)
+    {
+        try
+        {
+            var width = Console.WindowWidth;
+            if (width <= 1 || text.Length < width)
+            {
+                return text;
+            }
+
+            return text[..Math.Max(1, width - 1)];
+        }
+        catch (IOException)
+        {
+            return text;
+        }
     }
 
     private static int GetDisplayCurrent(IndexingProgress progress)

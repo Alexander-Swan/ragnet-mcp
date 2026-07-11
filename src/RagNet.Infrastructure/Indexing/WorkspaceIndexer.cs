@@ -313,7 +313,7 @@ public sealed class WorkspaceIndexer(
                 }
 
                 analyzedFiles++;
-                Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzedFiles, totalChangedFiles, "Analyzing changed files.");
+                Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzedFiles, totalChangedFiles, $"Analyzing {FormatProgressPath(workspaceRoot, file)}");
             }
 
             var embeddedBatch = await CreateEmbeddingsAsync(
@@ -324,7 +324,7 @@ public sealed class WorkspaceIndexer(
                 progress: null,
                 reportStart: false);
             embeddedFiles += fileBatch.Length;
-            Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, embeddedFiles, totalChangedFiles, "Creating embeddings.");
+            Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, embeddedFiles, totalChangedFiles, $"Creating embeddings for {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
 
             foreach (var pair in CountChunksByFile(embeddedBatch.Chunks))
             {
@@ -336,7 +336,7 @@ public sealed class WorkspaceIndexer(
             if (embeddedBatch.Chunks.Count == 0)
             {
                 upsertedFiles += fileBatch.Length;
-                Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, "Writing vectors to store.");
+                Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, $"Writing vectors through {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
                 continue;
             }
 
@@ -348,7 +348,7 @@ public sealed class WorkspaceIndexer(
                 cancellationToken);
             embeddedChunks += embeddedBatch.Chunks.Count;
             upsertedFiles += fileBatch.Length;
-            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, "Writing vectors to store.");
+            Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, $"Writing vectors through {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
         }
 
         return new StreamedIndexResult(chunkCountsByFile, embeddedChunks);
@@ -654,7 +654,7 @@ public sealed class WorkspaceIndexer(
             }
 
             scanned++;
-            Report(progress, workspaceRoot, IndexingProgressStage.ScanningFiles, scanned, scanPlan.FilesToScan.Count, "Scanning files.");
+            Report(progress, workspaceRoot, IndexingProgressStage.ScanningFiles, scanned, scanPlan.FilesToScan.Count, $"Scanning {FormatProgressPath(workspaceRoot, file)}");
         }
 
         var changedFiles = scanPlan.ChangeDetectorUsed
@@ -690,7 +690,7 @@ public sealed class WorkspaceIndexer(
                 if (analyzer is null)
                 {
                     analyzed++;
-                    Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzed, changedFiles.Length, "Analyzing changed files.");
+                    Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzed, changedFiles.Length, $"Analyzing {FormatProgressPath(workspaceRoot, file)}");
                     continue;
                 }
 
@@ -709,7 +709,7 @@ public sealed class WorkspaceIndexer(
                 }
 
                 analyzed++;
-                Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzed, changedFiles.Length, "Analyzing changed files.");
+                Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, analyzed, changedFiles.Length, $"Analyzing {FormatProgressPath(workspaceRoot, file)}");
             }
         }
 
@@ -1844,6 +1844,9 @@ public sealed class WorkspaceIndexer(
         int? total,
         string message)
         => progress?.Report(new IndexingProgress(workspaceRoot, stage, current, total, message));
+
+    private static string FormatProgressPath(string workspaceRoot, string filePath)
+        => GetRelativePathOrNull(workspaceRoot, filePath) ?? filePath;
 
     private sealed record WorkspaceIndexTargetPlan(
         string WorkspaceRoot,
