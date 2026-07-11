@@ -269,6 +269,20 @@ function Invoke-Compose {
     Invoke-Native { & $script:ResolvedContainerRuntime compose @Arguments }
 }
 
+function Start-ComposeServicesDetached {
+    param([string[]]$Services)
+
+    if ($Services.Count -eq 0) {
+        return
+    }
+
+    Invoke-Native { & $script:ResolvedContainerRuntime compose up --detach @Services }
+}
+
+function Start-McpServiceDetached {
+    Invoke-Native { & $script:ResolvedContainerRuntime compose up --detach --build --no-deps ragnet-mcp }
+}
+
 function Write-ComposeEnvFile {
     param(
         [string]$QdrantBaseUrl,
@@ -580,16 +594,14 @@ try {
         if ($useOllamaContainer) { $dependencyServices += "ollama" }
 
         Test-ServicePorts $portChecks
-        if ($dependencyServices.Count -gt 0) {
-            Invoke-Compose -Arguments (@("up", "-d") + $dependencyServices)
-        }
+        Start-ComposeServicesDetached -Services $dependencyServices
         Write-QdrantPersistenceInfo -UseQdrantContainer $useQdrantContainer
 
         if (-not $SkipModelPull) {
             Pull-OllamaModels -UseContainer $useOllamaContainer
         }
 
-        Invoke-Compose -Arguments @("up", "-d", "--build", "--no-deps", "ragnet-mcp")
+        Start-McpServiceDetached
         Publish-Indexer
     }
     elseif ($Mode -eq "Hybrid") {
@@ -611,13 +623,11 @@ try {
         if ($useOllamaContainer) { $services += "ollama" }
 
         Test-ServicePorts $portChecks
-        if ($services.Count -gt 0) {
-            Invoke-Compose -Arguments (@("up", "-d") + $services)
-        }
+        Start-ComposeServicesDetached -Services $services
         Write-QdrantPersistenceInfo -UseQdrantContainer $useQdrantContainer
 
         Pull-OllamaModels -UseContainer $useOllamaContainer
-        Invoke-Compose -Arguments @("up", "-d", "--build", "--no-deps", "ragnet-mcp")
+        Start-McpServiceDetached
 
         Publish-Indexer
     }
