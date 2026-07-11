@@ -186,7 +186,10 @@ public sealed class WorkspaceIndexer(
         }
 
         var workspaceRoot = targetPlan.WorkspaceRoot;
-        var targetCollectionName = analysis.FullReindex && !analysis.MergeScopedState
+        var targetCollectionName = !analysis.PreviousState.IsComplete &&
+            !string.IsNullOrWhiteSpace(analysis.PreviousState.IndexingCollectionName)
+            ? analysis.PreviousState.IndexingCollectionName!
+            : analysis.FullReindex && !analysis.MergeScopedState
             ? QdrantCollectionNaming.GetStagingCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot, DateTimeOffset.UtcNow)
             : await ResolveActiveCollectionNameAsync(workspaceRoot, cancellationToken);
 
@@ -204,6 +207,8 @@ public sealed class WorkspaceIndexer(
             targetPlan,
             analysis,
             targetCollectionName,
+            modelResolution.SelectedModel,
+            indexProfile,
             cancellationToken,
             progress);
 
@@ -232,7 +237,9 @@ public sealed class WorkspaceIndexer(
             modelResolution.SelectedModel,
             IndexSchemaVersions.CurrentText,
             indexedAtUtc,
-            StateExists: true), cancellationToken);
+            StateExists: true,
+            IsComplete: true,
+            IndexingCollectionName: null), cancellationToken);
 
         await indexedWorkspaceRegistry.MarkIndexedAsync(new IndexedWorkspaceRecord(
             workspaceRoot,
@@ -269,6 +276,8 @@ public sealed class WorkspaceIndexer(
         WorkspaceIndexTargetPlan targetPlan,
         WorkspaceIndexAnalysis analysis,
         string targetCollectionName,
+        string embeddingModel,
+        string indexProfile,
         CancellationToken cancellationToken,
         IProgress<IndexingProgress>? progress)
     {
@@ -357,11 +366,82 @@ public sealed class WorkspaceIndexer(
                 embeddedBatch.Embeddings,
                 cancellationToken);
             embeddedChunks += embeddedBatch.Chunks.Count;
+            await SaveIncompleteIndexStateAsync(
+                analysis,
+                targetCollectionName,
+                embeddingModel,
+                indexProfile,
+                chunkCountsByFile,
+                cancellationToken);
             upsertedFiles += fileBatch.Length;
             Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, $"Writing vectors through {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
         }
 
         return new StreamedIndexResult(chunkCountsByFile, embeddedChunks);
+    }
+
+    private async Task SaveIncompleteIndexStateAsync(
+        WorkspaceIndexAnalysis analysis,
+        string targetCollectionName,
+        string embeddingModel,
+        string indexProfile,
+        IReadOnlyDictionary<string, int> completedChunkCountsByFile,
+        CancellationToken cancellationToken)
+    {
+        var changedSet = analysis.ChangedFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var deletedSet = analysis.DeletedFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var completedSet = completedChunkCountsByFile.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var filesToSave = new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var file in analysis.PreviousState.Files.Values)
+        {
+            if (deletedSet.Contains(file.FilePath) || changedSet.Contains(file.FilePath))
+            {
+                continue;
+            }
+
+            if (!analysis.MergeScopedState &&
+                analysis.FullReindex &&
+                analysis.PreviousState.IsComplete)
+            {
+                continue;
+            }
+
+            if (analysis.MergeScopedState &&
+                FileMatchesProfile(file.FilePath, indexProfile) &&
+                analysis.TargetPlan.CanDeleteMissingFile(file.FilePath) &&
+                !analysis.CurrentFiles.ContainsKey(file.FilePath))
+            {
+                continue;
+            }
+
+            filesToSave[file.FilePath] = file;
+        }
+
+        foreach (var file in analysis.CurrentFiles.Values)
+        {
+            if (!completedSet.Contains(file.FilePath))
+            {
+                continue;
+            }
+
+            filesToSave[file.FilePath] = file with
+            {
+                ChunkCount = completedChunkCountsByFile.TryGetValue(file.FilePath, out var count)
+                    ? count
+                    : file.ChunkCount
+            };
+        }
+
+        await indexStateStore.SaveAsync(new WorkspaceIndexState(
+            analysis.TargetPlan.WorkspaceRoot,
+            filesToSave,
+            embeddingModel,
+            IndexSchemaVersions.CurrentText,
+            DateTimeOffset.UtcNow,
+            StateExists: true,
+            IsComplete: false,
+            IndexingCollectionName: targetCollectionName), cancellationToken);
     }
 
     private async Task<EmbeddedChunkBatch> CreateEmbeddingsAsync(
@@ -597,10 +677,11 @@ public sealed class WorkspaceIndexer(
         Report(progress, workspaceRoot, IndexingProgressStage.ComparingState, 0, null, "Comparing with previous index state.");
         var previousState = await indexStateStore.LoadAsync(workspaceRoot, cancellationToken);
         var stateCompatible = !previousState.StateExists || IsStateCompatible(previousState, embeddingModel);
+        var resumeIncompleteState = previousState.StateExists && !previousState.IsComplete && stateCompatible && !force;
         var profileScoped = indexProfile != IndexProfiles.All;
         var targetScoped = !targetPlan.IsFullWorkspace;
         var mergeScopedState = profileScoped || targetScoped;
-        var fullReindex = force || !stateCompatible;
+        var fullReindex = force || !stateCompatible || resumeIncompleteState;
         if (!stateCompatible && !force && !allowIncompatibleScopedState)
         {
             throw new InvalidOperationException(
@@ -617,8 +698,12 @@ public sealed class WorkspaceIndexer(
         {
             warnings.Add("Index state metadata changed or was missing; full reindex required.");
         }
+        else if (resumeIncompleteState)
+        {
+            warnings.Add("Resuming an incomplete index from the last completed file batch.");
+        }
 
-        if (fullReindex && !mergeScopedState)
+        if (fullReindex && !mergeScopedState && !resumeIncompleteState)
         {
             previousState = EmptyState(workspaceRoot);
         }

@@ -38,7 +38,9 @@ public sealed class FileWorkspaceIndexStateStore : IWorkspaceIndexStateStore
                 ? IndexSchemaVersions.ReadVersion(schemaVersion)
                 : null,
             state?.SavedAtUtc,
-            true);
+            true,
+            state?.IsComplete ?? true,
+            state?.IndexingCollectionName);
     }
 
     public async Task SaveAsync(WorkspaceIndexState state, CancellationToken cancellationToken = default)
@@ -52,6 +54,8 @@ public sealed class FileWorkspaceIndexStateStore : IWorkspaceIndexStateStore
             embeddingModel = state.EmbeddingModel,
             schemaVersion = IndexSchemaVersions.Current,
             savedAtUtc = state.SavedAtUtc,
+            isComplete = state.IsComplete,
+            indexingCollectionName = state.IndexingCollectionName,
             files = state.Files.Values.OrderBy(file => file.FilePath, StringComparer.OrdinalIgnoreCase).ToArray()
         };
 
@@ -87,5 +91,7 @@ public sealed class FileWorkspaceIndexStateStore : IWorkspaceIndexStateStore
         string? EmbeddingModel,
         JsonElement? SchemaVersion,
         DateTimeOffset? SavedAtUtc,
+        bool? IsComplete,
+        string? IndexingCollectionName,
         IReadOnlyList<IndexedFileState> Files);
 }

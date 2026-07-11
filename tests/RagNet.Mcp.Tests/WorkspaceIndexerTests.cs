@@ -392,6 +392,74 @@ public sealed class WorkspaceIndexerTests
     }
 
     [Fact]
+    public async Task IndexAsync_SavesIncompleteStateAfterEachUpsertBatch()
+    {
+        using var workspace = new TemporaryWorkspace();
+        workspace.WriteFile("src/First.cs", "first");
+        workspace.WriteFile("src/Second.cs", "second");
+        var stateStore = new FakeStateStore(State(workspace.RootPath));
+        var vectorStore = new FakeVectorStore();
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            stateStore,
+            vectorStore,
+            new FakeAnalyzer(),
+            options: new RagNetOptions
+            {
+                Indexing = new IndexingOptions
+                {
+                    MaxFilesPerBatch = 1
+                }
+            });
+
+        await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.True(stateStore.SavedStates.Count >= 3);
+        Assert.Contains(stateStore.SavedStates.Take(stateStore.SavedStates.Count - 1), state => !state.IsComplete);
+        Assert.True(stateStore.SavedStates[^1].IsComplete);
+        var firstCheckpoint = stateStore.SavedStates.First(state => !state.IsComplete);
+        Assert.Equal(vectorStore.LastUpsertCollectionName, firstCheckpoint.IndexingCollectionName);
+        Assert.Single(firstCheckpoint.Files);
+    }
+
+    [Fact]
+    public async Task IndexAsync_ResumesIncompleteStateWithoutReembeddingCompletedFiles()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var first = workspace.WriteFile("src/First.cs", "first");
+        workspace.WriteFile("src/Second.cs", "second");
+        var completedFile = FileState(first, chunkCount: 1);
+        var stateStore = new FakeStateStore(
+            State(workspace.RootPath, completedFile) with
+            {
+                IsComplete = false,
+                IndexingCollectionName = "ragnet-stage-resume"
+            });
+        var vectorStore = new FakeVectorStore();
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            stateStore,
+            vectorStore,
+            new FakeAnalyzer(),
+            options: new RagNetOptions
+            {
+                Indexing = new IndexingOptions
+                {
+                    MaxFilesPerBatch = 1
+                }
+            });
+
+        var result = await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal(1, result.ChunksIndexed);
+        var upserted = Assert.Single(vectorStore.UpsertedChunks);
+        Assert.EndsWith("Second.cs", upserted.FilePath, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("ragnet-stage-resume", vectorStore.LastUpsertCollectionName);
+        Assert.True(stateStore.SavedState!.IsComplete);
+        Assert.Contains(result.Warnings, warning => warning.Contains("Resuming an incomplete index", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task IndexAsync_ReusesEmbeddingForDuplicateChunkContent()
     {
         using var workspace = new TemporaryWorkspace();
@@ -1099,12 +1167,15 @@ public sealed class WorkspaceIndexerTests
     {
         public WorkspaceIndexState? SavedState { get; private set; }
 
+        public List<WorkspaceIndexState> SavedStates { get; } = [];
+
         public Task<WorkspaceIndexState> LoadAsync(string workspaceRoot, CancellationToken cancellationToken = default)
-            => Task.FromResult(state);
+            => Task.FromResult(SavedState ?? state);
 
         public Task SaveAsync(WorkspaceIndexState state, CancellationToken cancellationToken = default)
         {
             SavedState = state;
+            SavedStates.Add(state);
             return Task.CompletedTask;
         }
 

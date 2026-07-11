@@ -87,6 +87,8 @@ public sealed class QdrantWorkspaceIndexStateStore(
                             embedding_model = state.EmbeddingModel,
                             schema_version = IndexSchemaVersions.Current,
                             saved_at_utc = state.SavedAtUtc,
+                            is_complete = state.IsComplete,
+                            indexing_collection_name = state.IndexingCollectionName,
                             files = state.Files.Values
                                 .OrderBy(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
                                 .Select(file => new
@@ -201,7 +203,9 @@ public sealed class QdrantWorkspaceIndexStateStore(
             GetNullableString(payload, "embedding_model"),
             IndexSchemaVersions.ReadPayloadVersion(payload),
             GetNullableDateTimeOffset(payload, "saved_at_utc"),
-            StateExists: true);
+            StateExists: true,
+            IsComplete: GetNullableBool(payload, "is_complete") ?? true,
+            IndexingCollectionName: GetNullableString(payload, "indexing_collection_name"));
         return true;
     }
 
@@ -259,6 +263,11 @@ public sealed class QdrantWorkspaceIndexStateStore(
         => element.TryGetProperty(name, out var value) && value.TryGetInt32(out var result)
             ? result
             : 0;
+
+    private static bool? GetNullableBool(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean()
+            : null;
 
     private static DateTimeOffset GetDateTimeOffset(JsonElement element, string name)
         => element.TryGetProperty(name, out var value) && value.TryGetDateTimeOffset(out var result)

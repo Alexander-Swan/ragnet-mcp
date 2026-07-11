@@ -6,4 +6,6 @@ public sealed record WorkspaceIndexState(
     string? EmbeddingModel,
     string? SchemaVersion,
     DateTimeOffset? SavedAtUtc,
-    bool StateExists);
+    bool StateExists,
+    bool IsComplete = true,
+    string? IndexingCollectionName = null);
