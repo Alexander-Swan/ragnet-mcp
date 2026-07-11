@@ -15,7 +15,7 @@ namespace RagNet.Mcp.Tests;
 
 public sealed class WorkspaceIndexerTests
 {
-    private const string CurrentSchemaVersion = "1";
+    private static readonly string CurrentSchemaVersion = IndexSchemaVersions.CurrentText;
 
     [Fact]
     public async Task IndexAsync_ReindexesOnlyChangedFilesAndDeletesRemovedFiles()
@@ -974,7 +974,7 @@ public sealed class WorkspaceIndexerTests
         => new(
             Path.GetFullPath(workspaceRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
             files.ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase),
-            "mxbai-embed-large",
+            "nomic-embed-text",
             schemaVersion,
             DateTimeOffset.UtcNow,
             StateExists: true);
@@ -1132,7 +1132,7 @@ public sealed class WorkspaceIndexerTests
 
         public Task<IReadOnlyList<EmbeddingModelInfo>> ListInstalledModelsAsync(CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<EmbeddingModelInfo>>(
-                modelResolution?.InstalledModels ?? [new EmbeddingModelInfo("mxbai-embed-large:latest")]);
+                modelResolution?.InstalledModels ?? [new EmbeddingModelInfo("nomic-embed-text:latest")]);
 
         public Task<EmbeddingModelResolution> ResolveEmbeddingModelAsync(CancellationToken cancellationToken = default)
         {
@@ -1143,10 +1143,10 @@ public sealed class WorkspaceIndexerTests
             }
 
             return Task.FromResult(modelResolution ?? new EmbeddingModelResolution(
-                "mxbai-embed-large",
-                "mxbai-embed-large",
+                "nomic-embed-text",
+                "nomic-embed-text",
                 UsedFallback: false,
-                [new EmbeddingModelInfo("mxbai-embed-large:latest")],
+                [new EmbeddingModelInfo("nomic-embed-text:latest")],
                 Message: null));
         }
 

@@ -79,7 +79,7 @@ public sealed class QdrantWorkspaceIndexStateStoreTests
                     "workspace_root": {{JsonSerializer.Serialize(workspaceRoot)}},
                     "workspace_id": "workspace-id",
                     "embedding_model": "test-model",
-                    "schema_version": "1",
+                    "schema_version": 2,
                     "saved_at_utc": "2026-07-07T12:34:56+00:00",
                     "files": [
                       {

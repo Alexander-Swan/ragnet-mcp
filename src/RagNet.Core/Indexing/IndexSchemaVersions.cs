@@ -5,7 +5,7 @@ namespace RagNet.Mcp.Indexing;
 
 public static class IndexSchemaVersions
 {
-    public const int Current = 1;
+    public const int Current = 2;
 
     public const string PayloadFieldName = "schema_version";
 

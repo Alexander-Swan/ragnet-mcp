@@ -39,8 +39,8 @@ Hybrid mode does this by default:
 - starts Qdrant at `http://localhost:6333` unless a host Qdrant service is already listening there
 - starts Ollama at `http://localhost:11434` unless a host Ollama service is already listening there
 - starts RagNet MCP at `http://localhost:7331` by default
-- pulls the primary embedding model, default `mxbai-embed-large`
-- pulls additional compatibility embedding models, default `nomic-embed-text`
+- pulls the primary embedding model, default `nomic-embed-text`
+- pulls additional compatibility embedding models when requested
 - publishes `ragnet-indexer.exe`
 - registers MCP configs for supported local tools
 
@@ -399,7 +399,7 @@ Existing Qdrant data is still usable. To enrich existing workspace registry reco
 .\bin\ragnet-indexer.exe workspace migrate
 ```
 
-Migration keeps schema version `1`, rewrites records in place with repository/relative metadata when local git state can be inferred, and reports paths it cannot inspect.
+Migration keeps the current schema version, rewrites records in place with repository/relative metadata when local git state can be inferred, and reports paths it cannot inspect.
 
 ## Search
 
@@ -477,13 +477,13 @@ docker compose up -d qdrant ollama
 Pull the default embedding model:
 
 ```powershell
-docker exec ollama ollama pull mxbai-embed-large
+docker exec ollama ollama pull nomic-embed-text
 ```
 
 Pull the default embedding model into local Ollama:
 
 ```powershell
-ollama pull mxbai-embed-large
+ollama pull nomic-embed-text
 ```
 
 Start the MCP server from source:

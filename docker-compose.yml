@@ -39,7 +39,7 @@ services:
       ASPNETCORE_URLS: http://+:7331
       RagNet__Qdrant__BaseUrl: ${RAGNET_QDRANT_BASE_URL:-http://qdrant:6333}
       RagNet__Ollama__BaseUrl: ${RAGNET_OLLAMA_BASE_URL:-http://ollama:11434}
-      RagNet__Ollama__EmbeddingModel: ${RAGNET_EMBEDDING_MODEL:-mxbai-embed-large}
+      RagNet__Ollama__EmbeddingModel: ${RAGNET_EMBEDDING_MODEL:-nomic-embed-text}
 
 volumes:
   qdrant_storage:

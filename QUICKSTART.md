@@ -8,7 +8,7 @@ For detailed setup, modes, registration, and troubleshooting, see [SETUP.md](SET
 .\scripts\setup.ps1 -Mode Hybrid
 ```
 
-This starts Qdrant and RagNet MCP in Docker, starts Ollama in Docker unless local Ollama is already available, pulls the default RagNet embedding model plus `nomic-embed-text` for compatibility, publishes the local indexer executable, and registers supported MCP clients:
+This starts Qdrant and RagNet MCP in Docker, starts Ollama in Docker unless local Ollama is already available, pulls the default RagNet embedding model, publishes the local indexer executable, and registers supported MCP clients:
 
 - `.mcp.json` for Visual Studio
 - `.vscode/mcp.json` for VS Code

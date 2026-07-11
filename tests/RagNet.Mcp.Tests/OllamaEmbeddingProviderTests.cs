@@ -112,6 +112,7 @@ public sealed class OllamaEmbeddingProviderTests
                 Ollama = new OllamaOptions
                 {
                     EmbeddingModel = "test-embed",
+                    FallbackEmbeddingModel = "nomic-embed-text",
                     AllowInstalledEmbeddingModelFallback = allowFallback
                 }
             }));

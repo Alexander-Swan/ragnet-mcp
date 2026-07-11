@@ -92,7 +92,7 @@ public sealed class QdrantWorkspaceTransferServiceTests
             $$"""
             {
               "format": "ragnet-qdrant-workspace-export-v1",
-              "schemaVersion": "1",
+              "schemaVersion": "2",
               "exportedAtUtc": "2026-07-09T12:00:00+00:00",
               "collectionPrefix": "test",
               "kind": "workspace",
@@ -165,7 +165,7 @@ public sealed class QdrantWorkspaceTransferServiceTests
                     "payload": {
                       "workspace_root": {{JsonSerializer.Serialize(workspace.Path)}},
                       "file_path": {{JsonSerializer.Serialize(filePath)}},
-                      "schema_version": 1
+                      "schema_version": 2
                     }
                   },
                   {
@@ -173,7 +173,7 @@ public sealed class QdrantWorkspaceTransferServiceTests
                     "payload": {
                       "workspace_root": {{JsonSerializer.Serialize(workspace.Path)}},
                       "file_path": {{JsonSerializer.Serialize(filePath)}},
-                      "schema_version": 1
+                      "schema_version": 2
                     }
                   }
                 ]

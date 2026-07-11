@@ -5,9 +5,9 @@ param(
     [ValidateSet("Auto", "Docker", "Nerdctl")]
     [string]$ContainerRuntime = "Auto",
 
-    [string]$EmbeddingModel = "mxbai-embed-large",
+    [string]$EmbeddingModel = "nomic-embed-text",
 
-    [string[]]$AdditionalEmbeddingModels = @("nomic-embed-text"),
+    [string[]]$AdditionalEmbeddingModels = @(),
 
     [ValidateSet("Auto", "Docker", "Local")]
     [string]$OllamaMode = "Docker",
