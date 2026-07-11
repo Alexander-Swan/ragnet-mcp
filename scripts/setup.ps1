@@ -7,7 +7,7 @@ param(
 
     [string]$EmbeddingModel = "nomic-embed-text",
 
-    [string[]]$AdditionalEmbeddingModels = @(),
+    [object]$AdditionalEmbeddingModels = @(),
 
     [ValidateSet("Auto", "Docker", "Local")]
     [string]$OllamaMode = "Docker",
@@ -76,6 +76,50 @@ function Invoke-Native {
     }
 }
 
+function ConvertTo-StringArray {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return [string[]]@()
+    }
+
+    $items = New-Object System.Collections.Generic.List[string]
+    if ($Value -is [string]) {
+        $Value -split "[,;]" |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { [void]$items.Add($_) }
+        return [string[]]$items.ToArray()
+    }
+
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($property in $Value.PSObject.Properties) {
+            foreach ($item in (ConvertTo-StringArray $property.Value)) {
+                [void]$items.Add($item)
+            }
+        }
+
+        return [string[]]$items.ToArray()
+    }
+
+    if ($Value -is [System.Collections.IEnumerable]) {
+        foreach ($entry in $Value) {
+            foreach ($item in (ConvertTo-StringArray $entry)) {
+                [void]$items.Add($item)
+            }
+        }
+
+        return [string[]]$items.ToArray()
+    }
+
+    $text = $Value.ToString().Trim()
+    if (-not [string]::IsNullOrWhiteSpace($text)) {
+        [void]$items.Add($text)
+    }
+
+    return [string[]]$items.ToArray()
+}
+
 function Test-PortInUse {
     param([int]$Port)
 
@@ -127,20 +171,19 @@ function Read-SetupChoice {
 }
 
 function Read-ModelList {
-    param([string[]]$DefaultModels)
+    param([object]$DefaultModels)
 
-    $defaultText = $DefaultModels -join ", "
+    $defaultModelList = ConvertTo-StringArray $DefaultModels
+    $defaultText = $defaultModelList -join ", "
     $value = Read-Host "Additional embedding models, comma-separated or blank for default [$defaultText]"
     if ([string]::IsNullOrWhiteSpace($value)) {
-        return $DefaultModels
+        return $defaultModelList
     }
 
-    return @(
-        $value -split "," |
-            ForEach-Object { $_.Trim() } |
-            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    )
+    return ConvertTo-StringArray $value
 }
+
+$script:AdditionalEmbeddingModels = ConvertTo-StringArray $AdditionalEmbeddingModels
 
 function Show-SetupSummary {
     $mcpEndpoint = "http://localhost:$McpPort/ragnet-mcp"
@@ -527,24 +570,26 @@ try {
         $ollamaBaseUrl = if ($useOllamaContainer) { "http://ollama:11434" } else { "http://host.docker.internal:11434" }
         Write-ComposeEnvFile -QdrantBaseUrl $qdrantBaseUrl -OllamaBaseUrl $ollamaBaseUrl
 
-        $services = @()
+        $dependencyServices = @()
         $portChecks = @(
             @{ Name = "qdrant"; Ports = @(6333, 6334); AllowExternal = -not $useQdrantContainer },
             @{ Name = "ollama"; Ports = @(11434); AllowExternal = -not $useOllamaContainer },
             @{ Name = "ragnet-mcp"; Ports = @($McpPort); AllowExternal = $false }
         )
-        if ($useQdrantContainer) { $services += "qdrant" }
-        if ($useOllamaContainer) { $services += "ollama" }
-        $services += "ragnet-mcp"
+        if ($useQdrantContainer) { $dependencyServices += "qdrant" }
+        if ($useOllamaContainer) { $dependencyServices += "ollama" }
 
         Test-ServicePorts $portChecks
-        Invoke-Compose up -d --build @services
+        if ($dependencyServices.Count -gt 0) {
+            Invoke-Compose up -d @dependencyServices
+        }
         Write-QdrantPersistenceInfo -UseQdrantContainer $useQdrantContainer
 
         if (-not $SkipModelPull) {
             Pull-OllamaModels -UseContainer $useOllamaContainer
         }
 
+        Invoke-Compose up -d --build --no-deps ragnet-mcp
         Publish-Indexer
     }
     elseif ($Mode -eq "Hybrid") {

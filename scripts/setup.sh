@@ -631,23 +631,26 @@ if [[ "$MODE" == "Docker" ]]; then
   use_ollama_container && use_ollama_container_result=true || use_ollama_container_result=false
   qdrant_base_url="http://host.docker.internal:6333"
   ollama_base_url="http://host.docker.internal:11434"
-  services=(ragnet-mcp)
+  services=()
   if [[ "$use_qdrant_container_result" == "true" ]]; then
     qdrant_base_url="http://qdrant:6333"
-    services=(qdrant "${services[@]}")
+    services+=(qdrant)
   fi
   if [[ "$use_ollama_container_result" == "true" ]]; then
     ollama_base_url="http://ollama:11434"
-    services=(ollama "${services[@]}")
+    services+=(ollama)
   fi
   write_compose_env_file "$qdrant_base_url" "$ollama_base_url"
   check_service_ports \
     "qdrant|$([[ "$use_qdrant_container_result" == "true" ]] && echo false || echo true)|6333,6334" \
     "ollama|$([[ "$use_ollama_container_result" == "true" ]] && echo false || echo true)|11434" \
     "ragnet-mcp|false|$MCP_PORT"
-  compose up -d --build "${services[@]}"
+  if [[ "${#services[@]}" -gt 0 ]]; then
+    compose up -d "${services[@]}"
+  fi
   show_qdrant_persistence_info "$use_qdrant_container_result"
   pull_ollama_models "$use_ollama_container_result"
+  compose up -d --build --no-deps ragnet-mcp
   publish_indexer
 elif [[ "$MODE" == "Hybrid" ]]; then
   require_command dotnet
