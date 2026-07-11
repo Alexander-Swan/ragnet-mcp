@@ -176,7 +176,7 @@ static async Task<int> RunAsync(
             }
 
             var indexProfile = GetString(options, "profile") ?? GetString(options, "index-profile");
-            var excludeDirectories = GetMany(options, "exclude");
+            var excludeDirectories = GetManyDelimited(options, "exclude");
             var force = GetBool(options, "force");
             if (dryRun)
             {
@@ -564,6 +564,7 @@ static string NormalizeOptionName(string name)
         "g" => "group",
         "a" => "add",
         "p" => "profile",
+        "e" => "exclude",
         "f" => "force",
         _ => name
     };
@@ -577,6 +578,19 @@ static IReadOnlyList<string>? GetMany(Dictionary<string, List<string>> options, 
     => options.TryGetValue(name, out var values) && values.Count > 0
         ? values.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray()
         : null;
+
+static IReadOnlyList<string>? GetManyDelimited(Dictionary<string, List<string>> options, string name)
+    => options.TryGetValue(name, out var values) && values.Count > 0
+        ? values
+            .SelectMany(SplitManyOptionValue)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray()
+        : null;
+
+static IEnumerable<string> SplitManyOptionValue(string value)
+    => value
+        .Split([',', ';'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
 static string? GetString(Dictionary<string, List<string>> options, string name)
     => options.TryGetValue(name, out var values) && values.Count > 0 && !string.IsNullOrWhiteSpace(values[^1])
@@ -721,7 +735,7 @@ static async Task<IReadOnlyList<IndexWorkspaceResult>> IndexGroupAsync(
     IProgress<IndexingProgress>? progress)
     => await indexer.IndexGroupAsync(
         group,
-        GetMany(options, "exclude"),
+        GetManyDelimited(options, "exclude"),
         GetBool(options, "force"),
         GetString(options, "profile") ?? GetString(options, "index-profile"),
         progress: progress);
@@ -733,7 +747,7 @@ static async Task<IReadOnlyList<DryRunIndexWorkspaceResult>> DryRunIndexGroupAsy
     IProgress<IndexingProgress>? progress)
     => await indexer.DryRunIndexGroupAsync(
         group,
-        GetMany(options, "exclude"),
+        GetManyDelimited(options, "exclude"),
         GetBool(options, "force"),
         GetString(options, "profile") ?? GetString(options, "index-profile"),
         progress: progress);
@@ -1180,8 +1194,8 @@ static void WriteHelp()
     RagNet Indexer
 
     Commands:
-      index       --workspace|-w <target> [--workspace|-w <target> ...] [--current|-c] [--group|-g <name>] [--add|-a] [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
-      index       --group|-g <name> [--force] [--dry-run] [--profile <profile>] [--exclude <dir-or-relative-path> ...]
+      index       --workspace|-w <target> [--workspace|-w <target> ...] [--current|-c] [--group|-g <name>] [--add|-a] [--force] [--dry-run] [--profile <profile>] [--exclude|-e <dir-or-relative-path> ...]
+      index       --group|-g <name> [--force] [--dry-run] [--profile <profile>] [--exclude|-e <dir-or-relative-path> ...]
       status      --workspace <path>
       status      qdrant
       workspace   collection [--workspace <path-or-name>|--group <name>|--path <file-or-directory>]
@@ -1207,6 +1221,7 @@ static void WriteHelp()
       --current, -c   Add the current directory as an index target.
       --add, -a       With --workspace and --group, append targets to the existing group instead of replacing it.
       --dry-run       Preview files and chunks that would be indexed without writing vectors, state, registry, or local groups.
+      --exclude, -e   Exclude a directory name or relative path. Repeat, pass several values, or use comma/semicolon-separated values.
       --no-progress   Suppress progress output. Index/status/delete results are written to stdout.
       --queries       Search evaluation JSON file. Eval exits 0 when all queries pass and 2 when any query misses.
       --output        Export directory for a RagNet Qdrant workspace/group export.
@@ -1220,6 +1235,7 @@ static void WriteHelp()
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln
       ragnet-indexer index --current
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln --dry-run
+      ragnet-indexer index -w D:\Work\Product\Api -e bin -e obj -e "artifacts;node_modules"
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln --workspace D:\Work\Product\Admin\Admin.sln --group my-product
       ragnet-indexer index -w D:\Work\Product\Api\Api.sln -w D:\Work\Product\docs\api
       ragnet-indexer index -w D:\Work\Product\Worker -g my-product -a
