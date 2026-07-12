@@ -193,6 +193,31 @@ public sealed class WorkspaceIndexer(
             ? QdrantCollectionNaming.GetStagingCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot, DateTimeOffset.UtcNow)
             : await ResolveActiveCollectionNameAsync(workspaceRoot, cancellationToken);
 
+        var workspaceGroups = await GetWorkspaceGroupsForRootAsync(workspaceRoot, cancellationToken);
+        var targetRelativePaths = targetPlan.IndexedTargets
+            .Select(target => GetRelativePathOrNull(analysis.SourceIdentity.RepositoryRoot, target))
+            .Where(relativePath => !string.IsNullOrWhiteSpace(relativePath))
+            .Select(relativePath => relativePath!)
+            .ToArray();
+        var startedAtUtc = DateTimeOffset.UtcNow;
+        await indexedWorkspaceRegistry.MarkIndexedAsync(new IndexedWorkspaceRecord(
+            workspaceRoot,
+            QdrantCollectionNaming.GetWorkspaceId(workspaceRoot),
+            targetCollectionName,
+            workspaceGroups,
+            targetPlan.IndexedTargets,
+            startedAtUtc,
+            analysis.FilesScanned,
+            ChunksIndexed: 0,
+            analysis.FullReindex,
+            analysis.SourceIdentity.RepositoryRoot,
+            GetRelativePathOrNull(analysis.SourceIdentity.RepositoryRoot, workspaceRoot),
+            analysis.SourceIdentity.RemoteUrl,
+            analysis.SourceIdentity.Branch,
+            analysis.SourceIdentity.CommitSha,
+            targetRelativePaths,
+            Status: IndexedWorkspaceStatuses.Indexing), cancellationToken);
+
         var filesToDelete = analysis.DeletedFiles.Concat(analysis.ChangedFiles).ToArray();
         Report(progress, workspaceRoot, IndexingProgressStage.DeletingVectors, 0, filesToDelete.Length, "Deleting stale vectors.");
         if (filesToDelete.Length > 0 && (analysis.MergeScopedState || !analysis.FullReindex))
@@ -245,7 +270,7 @@ public sealed class WorkspaceIndexer(
             workspaceRoot,
             QdrantCollectionNaming.GetWorkspaceId(workspaceRoot),
             targetCollectionName,
-            await GetWorkspaceGroupsForRootAsync(workspaceRoot, cancellationToken),
+            workspaceGroups,
             targetPlan.IndexedTargets,
             indexedAtUtc,
             analysis.FilesScanned,
@@ -256,11 +281,8 @@ public sealed class WorkspaceIndexer(
             analysis.SourceIdentity.RemoteUrl,
             analysis.SourceIdentity.Branch,
             analysis.SourceIdentity.CommitSha,
-            targetPlan.IndexedTargets
-                .Select(target => GetRelativePathOrNull(analysis.SourceIdentity.RepositoryRoot, target))
-                .Where(relativePath => !string.IsNullOrWhiteSpace(relativePath))
-                .Select(relativePath => relativePath!)
-                .ToArray()), cancellationToken);
+            targetRelativePaths,
+            Status: IndexedWorkspaceStatuses.Completed), cancellationToken);
 
         Report(progress, workspaceRoot, IndexingProgressStage.Completed, streamedIndex.ChunksEmbedded, null, "Indexing completed.");
         return new IndexWorkspaceResult(

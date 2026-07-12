@@ -45,6 +45,7 @@ public sealed class QdrantIndexedWorkspaceRegistryTests
         Assert.Contains("Api.sln", aliases);
         Assert.Contains("Api", aliases);
         Assert.Equal(IndexSchemaVersions.Current, payload.GetProperty("schema_version").GetInt32());
+        Assert.Equal(IndexedWorkspaceStatuses.Completed, payload.GetProperty("status").GetString());
     }
 
     [Fact]
@@ -69,7 +70,8 @@ public sealed class QdrantIndexedWorkspaceRegistryTests
                       "last_indexed_utc": "2026-07-09T12:00:00+00:00",
                       "files_scanned": 1,
                       "chunks_indexed": 2,
-                      "full_reindex": true
+                      "full_reindex": true,
+                      "status": "indexing"
                     }
                   }
                 ]
@@ -83,6 +85,7 @@ public sealed class QdrantIndexedWorkspaceRegistryTests
         Assert.Equal(Path.GetFullPath(workspaceRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), record.WorkspaceRoot);
         Assert.Equal(collectionName, record.CollectionName);
         Assert.Equal(2, record.ChunksIndexed);
+        Assert.Equal(IndexedWorkspaceStatuses.Indexing, record.Status);
     }
 
     private static QdrantIndexedWorkspaceRegistry CreateRegistry(FakeQdrantHandler handler)

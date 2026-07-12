@@ -58,7 +58,8 @@ public sealed class QdrantIndexedWorkspaceRegistry(
                             last_indexed_utc = record.LastIndexedUtc,
                             files_scanned = record.FilesScanned,
                             chunks_indexed = record.ChunksIndexed,
-                            full_reindex = record.FullReindex
+                            full_reindex = record.FullReindex,
+                            status = NormalizeStatus(record.Status)
                         }
                     }
                 }
@@ -228,9 +229,15 @@ public sealed class QdrantIndexedWorkspaceRegistry(
             NullIfWhiteSpace(GetString(payload, "commit_sha")),
             GetStringArray(payload, "indexed_target_relative_paths"),
             NullIfWhiteSpace(GetString(payload, "display_name")),
-            GetStringArray(payload, "aliases")).WithCalculatedNames();
+            GetStringArray(payload, "aliases"),
+            NormalizeStatus(GetString(payload, "status"))).WithCalculatedNames();
         return true;
     }
+
+    private static string NormalizeStatus(string? status)
+        => string.Equals(status, IndexedWorkspaceStatuses.Indexing, StringComparison.OrdinalIgnoreCase)
+            ? IndexedWorkspaceStatuses.Indexing
+            : IndexedWorkspaceStatuses.Completed;
 
     private static IReadOnlyList<string> GetStringArray(JsonElement element, string name)
         => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Array

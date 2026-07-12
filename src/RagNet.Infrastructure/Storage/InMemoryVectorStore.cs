@@ -55,10 +55,13 @@ public sealed class InMemoryVectorStore : IVectorStore
     }
 
     public Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default)
+        => DeleteCollectionAsync(workspaceRoot, cancellationToken);
+
+    public Task DeleteCollectionAsync(string collectionName, CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            _entriesByWorkspace.Remove(workspaceRoot);
+            _entriesByWorkspace.Remove(collectionName);
         }
 
         return Task.CompletedTask;

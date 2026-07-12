@@ -345,7 +345,7 @@ List local indexer groups and indexed workspaces as tables, or remove them:
 
 `create group <name>` creates or replaces a local group from workspaces that already exist in the Qdrant workspace registry. Use indexed workspace names from `list workspaces`, full indexed workspace roots, or `--current` when the current directory is inside an indexed workspace. Add `--add`/`-a` to append to an existing local group.
 
-Configured groups are listed as read-only. `delete workspace` removes the Qdrant vector collection, Qdrant registry record, and Qdrant index-state point.
+Configured groups are listed as read-only. `delete workspace` removes the Qdrant vector collection, Qdrant registry record, Qdrant index-state point, and any incomplete indexing collection recorded in state. For an interrupted first index that has no registry record yet, pass the full workspace root.
 
 The indexer prints progress to stderr and writes index/status/delete results to stdout. For quiet automation:
 

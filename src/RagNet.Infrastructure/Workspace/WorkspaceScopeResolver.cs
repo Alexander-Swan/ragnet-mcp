@@ -23,6 +23,7 @@ public sealed class WorkspaceScopeResolver(
             WorkspaceScopeKind.ExplicitWorkspaceRoot => await ResolveWorkspaceAsync(Required(workspaceRoot, "workspace_root"), includeGroupedWorkspaces, cancellationToken),
             WorkspaceScopeKind.NamedWorkspaceGroup => await ResolveGroupAsync(Required(workspaceGroup, "workspace_group"), cancellationToken),
             WorkspaceScopeKind.AllIndexedWorkspaces => (await indexedWorkspaceRegistry.GetIndexedWorkspacesAsync(cancellationToken))
+                .Where(IsSearchable)
                 .Select(workspace => new WorkspaceInfo(workspace.WorkspaceRoot, workspace.EffectiveDisplayName, null, null))
                 .ToArray(),
             _ => throw new InvalidOperationException($"Unsupported workspace scope '{scope}'.")
@@ -109,6 +110,7 @@ public sealed class WorkspaceScopeResolver(
 
         var normalizedPath = NormalizeComparablePath(path);
         var match = workspaces
+            .Where(IsSearchable)
             .OrderByDescending(workspace => NormalizeComparablePath(workspace.WorkspaceRoot).Length)
             .FirstOrDefault(workspace =>
                 IndexedWorkspaceRecordNames.MatchesAlias(workspace, path) ||
@@ -148,6 +150,9 @@ public sealed class WorkspaceScopeResolver(
         => string.Equals(path, root, StringComparison.OrdinalIgnoreCase) ||
             path.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase) ||
             path.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsSearchable(IndexedWorkspaceRecord workspace)
+        => string.Equals(workspace.Status, IndexedWorkspaceStatuses.Completed, StringComparison.OrdinalIgnoreCase);
 
     private static string NormalizeComparablePath(string path)
     {

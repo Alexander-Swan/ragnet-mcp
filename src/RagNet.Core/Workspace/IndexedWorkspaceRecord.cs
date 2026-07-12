@@ -17,7 +17,8 @@ public sealed record IndexedWorkspaceRecord(
     string? CommitSha = null,
     IReadOnlyList<string>? IndexedTargetRelativePaths = null,
     string? DisplayName = null,
-    IReadOnlyList<string>? Aliases = null)
+    IReadOnlyList<string>? Aliases = null,
+    string Status = IndexedWorkspaceStatuses.Completed)
 {
     public string EffectiveDisplayName
         => string.IsNullOrWhiteSpace(DisplayName)
@@ -33,6 +34,13 @@ public sealed record IndexedWorkspaceRecord(
             DisplayName = IndexedWorkspaceRecordNames.GetDisplayName(WorkspaceRoot),
             Aliases = IndexedWorkspaceRecordNames.GetAliases(WorkspaceRoot, IndexedTargets, Aliases)
         };
+}
+
+public static class IndexedWorkspaceStatuses
+{
+    public const string Indexing = "indexing";
+
+    public const string Completed = "completed";
 }
 
 public static class IndexedWorkspaceRecordNames

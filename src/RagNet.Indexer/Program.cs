@@ -14,6 +14,7 @@ using RagNet.Mcp.Embeddings;
 using RagNet.Mcp.Indexing.Evaluation;
 using RagNet.Mcp.Indexing;
 using RagNet.Mcp.Indexing.Interfaces;
+using RagNet.Mcp.Storage;
 using RagNet.Mcp.Storage.Interfaces;
 using RagNet.Mcp.Workspace;
 using RagNet.Mcp.Workspace.Interfaces;
@@ -289,7 +290,8 @@ static async Task<int> RunAsync(
                         GetDeleteSubject(args, options, "workspace"),
                         workspaceRegistry,
                         vectorStore,
-                        stateStore), jsonOptions));
+                        stateStore,
+                        ragNetOptions), jsonOptions));
                     return 0;
 
                 default:
@@ -799,6 +801,7 @@ static void WriteWorkspacesTable(IReadOnlyList<IndexedWorkspaceRecord> workspace
         .Select(workspace => new[]
         {
             workspace.EffectiveDisplayName,
+            workspace.Status,
             FormatAliases(workspace),
             workspace.WorkspaceRoot,
             workspace.Groups.Count == 0 ? "-" : string.Join(", ", workspace.Groups),
@@ -810,7 +813,7 @@ static void WriteWorkspacesTable(IReadOnlyList<IndexedWorkspaceRecord> workspace
         })
         .ToArray();
 
-    WriteTable(["Name", "Aliases", "Root", "Groups", "Targets", "Last Indexed", "Files", "Chunks", "Collection"], rows);
+    WriteTable(["Name", "Status", "Aliases", "Root", "Groups", "Targets", "Last Indexed", "Files", "Chunks", "Collection"], rows);
 }
 
 static string FormatAliases(IndexedWorkspaceRecord workspace)
@@ -896,15 +899,90 @@ static async Task<DeleteIndexedWorkspaceResult> DeleteIndexedWorkspaceAsync(
     string workspace,
     IIndexedWorkspaceRegistry workspaceRegistry,
     IVectorStore vectorStore,
-    IWorkspaceIndexStateStore stateStore)
+    IWorkspaceIndexStateStore stateStore,
+    RagNetOptions ragNetOptions)
 {
-    var record = ResolveIndexedWorkspaceRecord(workspace, await workspaceRegistry.GetIndexedWorkspacesAsync());
+    var indexedWorkspaces = await workspaceRegistry.GetIndexedWorkspacesAsync();
+    var record = TryResolveIndexedWorkspaceRecord(workspace, indexedWorkspaces);
+    var workspaceRoot = record?.WorkspaceRoot ?? ResolveWorkspaceRootForDelete(workspace);
+    var state = await stateStore.LoadAsync(workspaceRoot);
+    var collectionNames = new List<string>();
 
-    await vectorStore.DeleteWorkspaceAsync(record.WorkspaceRoot);
-    await workspaceRegistry.DeleteWorkspaceAsync(record.WorkspaceRoot);
-    await stateStore.DeleteAsync(record.WorkspaceRoot);
-    Console.Error.WriteLine($"Deleted indexed workspace '{record.WorkspaceRoot}'.");
-    return new DeleteIndexedWorkspaceResult(record.WorkspaceRoot, record.WorkspaceId, record.CollectionName);
+    if (record is not null)
+    {
+        collectionNames.Add(record.CollectionName);
+    }
+
+    if (!string.IsNullOrWhiteSpace(state.IndexingCollectionName))
+    {
+        collectionNames.Add(state.IndexingCollectionName);
+    }
+
+    if (collectionNames.Count == 0 && !state.StateExists)
+    {
+        throw new InvalidOperationException($"Indexed workspace '{workspace}' was not found in the workspace registry or index state. Use a full workspace root for incomplete indexes.");
+    }
+
+    if (collectionNames.Count == 0)
+    {
+        collectionNames.Add(QdrantCollectionNaming.GetCollectionName(ragNetOptions.Qdrant.CollectionPrefix, workspaceRoot));
+    }
+
+    var deletedCollections = collectionNames
+        .Where(collectionName => !string.IsNullOrWhiteSpace(collectionName))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+    foreach (var collectionName in deletedCollections)
+    {
+        await vectorStore.DeleteCollectionAsync(collectionName);
+    }
+
+    await workspaceRegistry.DeleteWorkspaceAsync(workspaceRoot);
+    await stateStore.DeleteAsync(workspaceRoot);
+    Console.Error.WriteLine($"Deleted indexed workspace '{workspaceRoot}'.");
+    return new DeleteIndexedWorkspaceResult(
+        workspaceRoot,
+        record?.WorkspaceId ?? QdrantCollectionNaming.GetWorkspaceId(workspaceRoot),
+        record?.CollectionName,
+        deletedCollections,
+        RemovedIncompleteState: state.StateExists && !state.IsComplete);
+}
+
+static string ResolveWorkspaceRootForDelete(string workspace)
+{
+    var trimmed = workspace.Trim();
+    if (string.IsNullOrWhiteSpace(trimmed))
+    {
+        throw new ArgumentException("Workspace target cannot be empty.");
+    }
+
+    if (!Path.IsPathFullyQualified(trimmed) &&
+        trimmed.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) < 0 &&
+        !Directory.Exists(trimmed) &&
+        !File.Exists(trimmed))
+    {
+        throw new InvalidOperationException($"Indexed workspace '{trimmed}' was not found in the workspace registry. Use a full workspace root for incomplete indexes.");
+    }
+
+    var fullPath = Path.GetFullPath(trimmed);
+    var directory = Directory.Exists(fullPath)
+        ? fullPath
+        : Path.GetDirectoryName(fullPath) ?? fullPath;
+    return NormalizePath(directory);
+}
+
+static IndexedWorkspaceRecord? TryResolveIndexedWorkspaceRecord(
+    string workspace,
+    IReadOnlyList<IndexedWorkspaceRecord> indexedWorkspaces)
+{
+    try
+    {
+        return ResolveIndexedWorkspaceRecord(workspace, indexedWorkspaces);
+    }
+    catch (InvalidOperationException ex) when (ex.Message.Contains("was not found in the workspace registry", StringComparison.OrdinalIgnoreCase))
+    {
+        return null;
+    }
 }
 
 static IndexedWorkspaceRecord ResolveIndexedWorkspaceRecord(
@@ -1273,7 +1351,12 @@ sealed record WorkspaceGroupListItem(
 
 sealed record DeleteWorkspaceGroupResult(string Name, string Source, string StorePath);
 
-sealed record DeleteIndexedWorkspaceResult(string WorkspaceRoot, string WorkspaceId, string CollectionName);
+sealed record DeleteIndexedWorkspaceResult(
+    string WorkspaceRoot,
+    string WorkspaceId,
+    string? CollectionName,
+    IReadOnlyList<string> DeletedCollections,
+    bool RemovedIncompleteState);
 
 sealed record CreateWorkspaceGroupResult(
     string Name,

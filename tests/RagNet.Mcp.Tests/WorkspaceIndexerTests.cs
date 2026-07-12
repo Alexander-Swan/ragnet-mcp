@@ -605,6 +605,8 @@ public sealed class WorkspaceIndexerTests
         Assert.Single(vectorStore.UpsertedChunks);
         Assert.NotEqual(activeCollection, vectorStore.LastUpsertCollectionName);
         Assert.Contains("-stage-", vectorStore.LastUpsertCollectionName, StringComparison.Ordinal);
+        Assert.Equal(IndexedWorkspaceStatuses.Indexing, registry.MarkedRecords[^2].Status);
+        Assert.Equal(IndexedWorkspaceStatuses.Completed, registry.MarkedRecords[^1].Status);
         Assert.Equal(vectorStore.LastUpsertCollectionName, registry.Records[^1].CollectionName);
     }
 
@@ -628,7 +630,8 @@ public sealed class WorkspaceIndexerTests
 
         Assert.False(vectorStore.WorkspaceDeleted);
         Assert.Empty(vectorStore.DeletedFiles);
-        Assert.Equal(activeCollection, registry.Records[^1].CollectionName);
+        Assert.Equal(IndexedWorkspaceStatuses.Indexing, registry.MarkedRecords[^1].Status);
+        Assert.NotEqual(activeCollection, registry.MarkedRecords[^1].CollectionName);
     }
 
     [Fact]
@@ -1122,8 +1125,12 @@ public sealed class WorkspaceIndexerTests
     {
         public List<IndexedWorkspaceRecord> Records { get; } = [];
 
+        public List<IndexedWorkspaceRecord> MarkedRecords { get; } = [];
+
         public Task MarkIndexedAsync(IndexedWorkspaceRecord record, CancellationToken cancellationToken = default)
         {
+            MarkedRecords.Add(record);
+            Records.RemoveAll(existing => string.Equals(existing.WorkspaceRoot, record.WorkspaceRoot, StringComparison.OrdinalIgnoreCase));
             Records.Add(record);
             return Task.CompletedTask;
         }
@@ -1270,6 +1277,8 @@ public sealed class WorkspaceIndexerTests
     {
         public List<string> DeletedFiles { get; } = [];
 
+        public List<string> DeletedCollections { get; } = [];
+
         public List<CodeChunk> UpsertedChunks { get; } = [];
 
         public List<float[]> UpsertedEmbeddings { get; } = [];
@@ -1332,6 +1341,13 @@ public sealed class WorkspaceIndexerTests
         public Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default)
         {
             WorkspaceDeleted = true;
+            DeletedCollections.Add(workspaceRoot);
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteCollectionAsync(string collectionName, CancellationToken cancellationToken = default)
+        {
+            DeletedCollections.Add(collectionName);
             return Task.CompletedTask;
         }
 

@@ -97,6 +97,30 @@ public sealed class WorkspaceScopeResolverTests
         Assert.Equal("Api", resolved.Name);
     }
 
+    [Fact]
+    public async Task ResolveAsync_AllIndexedWorkspacesSkipsIndexingRecords()
+    {
+        const string completeRoot = @"C:\Product\Api";
+        const string indexingRoot = @"C:\Product\Web";
+        var resolver = CreateResolver(
+            detectedWorkspaceRoot: "/app/fallback",
+            groups: [],
+            indexedWorkspaces:
+            [
+                WorkspaceRecord(completeRoot),
+                WorkspaceRecord(indexingRoot) with { Status = IndexedWorkspaceStatuses.Indexing }
+            ]);
+
+        var workspaces = await resolver.ResolveAsync(
+            filePath: null,
+            scope: "all_indexed_workspaces",
+            workspaceRoot: null,
+            workspaceGroup: null);
+
+        var resolved = Assert.Single(workspaces);
+        Assert.Equal(completeRoot, resolved.RootPath);
+    }
+
     private static WorkspaceScopeResolver CreateResolver(
         string detectedWorkspaceRoot,
         params WorkspaceGroupRecord[] groups)

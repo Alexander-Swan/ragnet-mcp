@@ -146,6 +146,11 @@ public sealed class QdrantVectorStore(
     public async Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default)
     {
         var collectionName = QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot);
+        await DeleteCollectionAsync(collectionName, cancellationToken);
+    }
+
+    public async Task DeleteCollectionAsync(string collectionName, CancellationToken cancellationToken = default)
+    {
         var response = await _httpClient.DeleteAsync($"collections/{Uri.EscapeDataString(collectionName)}?timeout=30", cancellationToken);
         if (response.StatusCode == HttpStatusCode.NotFound)
         {
@@ -321,9 +326,10 @@ public sealed class QdrantVectorStore(
         if (existingVectorSize is not null && existingVectorSize != vectorSize)
         {
             throw new InvalidOperationException(
-                string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"Qdrant collection '{collectionName}' has vector size {existingVectorSize}, but the current embedding size is {vectorSize}. Force a full reindex or delete the collection before indexing with a different embedding model."));
+                $"Qdrant collection '{collectionName}' has vector size {existingVectorSize}, but the current embedding size is {vectorSize}. " +
+                "Force a full workspace reindex or delete the collection before indexing with a different embedding model. " +
+                "If you already passed --force, make sure the target is the full workspace root, for example: ragnet-indexer index -c --force or ragnet-indexer index -w <workspace-root> --force. " +
+                "For solution, subfolder, file, group member, or profile-scoped indexing, --force only rebuilds that scope and cannot replace an incompatible active collection.");
         }
     }
 
@@ -612,7 +618,7 @@ public sealed class QdrantVectorStore(
     }
 }
 
-internal static partial class QdrantCollectionNaming
+public static partial class QdrantCollectionNaming
 {
     private const int WorkspaceIdHexLength = 32;
     private static readonly Regex UnsafeCollectionCharacters = UnsafeCollectionCharactersRegex();

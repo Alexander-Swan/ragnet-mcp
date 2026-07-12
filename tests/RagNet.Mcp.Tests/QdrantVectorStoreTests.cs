@@ -84,6 +84,25 @@ public sealed class QdrantVectorStoreTests
     }
 
     [Fact]
+    public async Task UpsertAsync_VectorSizeMismatchExplainsFullWorkspaceForceReindex()
+    {
+        using var handler = new FakeQdrantHandler();
+        handler.Enqueue(HttpStatusCode.OK, """{"result":{"config":{"params":{"vectors":{"size":3}}}}}""");
+        var store = CreateStore(handler);
+        var workspaceRoot = Path.Combine(Path.GetTempPath(), $"ragnet-qdrant-vector-tests-{Guid.NewGuid():N}");
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            store.UpsertAsync(
+                workspaceRoot,
+                [CreateChunk(workspaceRoot, "src/Program.cs", "code")],
+                [[1f, 0f]]));
+
+        Assert.Contains("full workspace reindex", exception.Message);
+        Assert.Contains("index -c --force", exception.Message);
+        Assert.Contains("solution, subfolder, file, group member, or profile-scoped", exception.Message);
+    }
+
+    [Fact]
     public async Task DeleteByFilesAsync_DeletesDistinctFilesWithSingleFilterRequest()
     {
         using var handler = new FakeQdrantHandler();
@@ -124,6 +143,20 @@ public sealed class QdrantVectorStoreTests
                 Path.GetFullPath(secondFile)
             ],
             should.Select(condition => condition.GetProperty("match").GetProperty("value").GetString() ?? string.Empty).ToArray());
+    }
+
+    [Fact]
+    public async Task DeleteCollectionAsync_DeletesExplicitCollectionName()
+    {
+        using var handler = new FakeQdrantHandler();
+        handler.Enqueue(HttpStatusCode.OK, "{}");
+        var store = CreateStore(handler);
+
+        await store.DeleteCollectionAsync("ragnet-stage-test");
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal("DELETE", request.Method);
+        Assert.Equal("/collections/ragnet-stage-test", request.Path);
     }
 
     private static QdrantVectorStore CreateStore(FakeQdrantHandler handler, int upsertBatchSize = 256)

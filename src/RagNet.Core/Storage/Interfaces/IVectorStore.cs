@@ -16,6 +16,8 @@ public interface IVectorStore
 
     Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default);
 
+    Task DeleteCollectionAsync(string collectionName, CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<SearchResult>> SearchAsync(
         string workspaceRoot,
         float[] embedding,
