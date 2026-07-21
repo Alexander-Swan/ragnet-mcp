@@ -8,6 +8,9 @@ public sealed class GitSourceIdentityResolver(ILogger<GitSourceIdentityResolver>
 {
     private const int GitTimeoutMilliseconds = 5_000;
 
+    public Task<bool> CanResolveAsync(string workspaceRoot, CancellationToken cancellationToken = default)
+        => Task.FromResult(FindGitMetadataRoot(NormalizePath(workspaceRoot)) is not null);
+
     public async Task<SourceIdentity> ResolveAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default)
     {
         var normalizedWorkspaceRoot = NormalizePath(workspaceRoot);

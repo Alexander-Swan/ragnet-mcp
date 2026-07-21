@@ -9,6 +9,9 @@ public sealed class GitSourceChangeDetector : ISourceChangeDetector
 {
     private const int GitTimeoutMilliseconds = 10_000;
 
+    public async Task<bool> CanDetectAsync(string workspaceRoot, CancellationToken cancellationToken = default)
+        => await TryGetRepositoryRootAsync(workspaceRoot, cancellationToken) is not null;
+
     public async Task<SourceChangeSet> DetectChangesAsync(
         string workspaceRoot,
         IReadOnlyList<string>? candidateFiles,

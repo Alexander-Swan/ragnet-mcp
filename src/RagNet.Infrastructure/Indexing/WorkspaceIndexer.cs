@@ -1646,7 +1646,7 @@ public sealed class WorkspaceIndexer(
     private static string? GetPreviousCommitSha(IndexedWorkspaceRecord? previousWorkspaceRecord, SourceIdentity currentSourceIdentity)
     {
         if (previousWorkspaceRecord is null ||
-            !currentSourceIdentity.IsGitRepository ||
+            string.IsNullOrWhiteSpace(currentSourceIdentity.CommitSha) ||
             string.IsNullOrWhiteSpace(previousWorkspaceRecord.CommitSha) ||
             !string.Equals(previousWorkspaceRecord.RepositoryRoot, currentSourceIdentity.RepositoryRoot, StringComparison.OrdinalIgnoreCase))
         {

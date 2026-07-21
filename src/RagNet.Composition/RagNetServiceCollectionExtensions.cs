@@ -83,8 +83,13 @@ public static class RagNetServiceCollectionExtensions
         services.AddSingleton<ICodeAnalyzer, ProjectMetadataAnalyzer>();
         services.AddSingleton<ICodeAnalyzer, JavaScriptTypeScriptAnalyzer>();
         services.AddSingleton<ICodeAnalyzer, MarkupAnalyzer>();
-        services.AddSingleton<ISourceIdentityResolver, GitSourceIdentityResolver>();
-        services.AddSingleton<ISourceChangeDetector, GitSourceChangeDetector>();
+        services.AddSingleton<ITfsCommandRunner, TfsCommandRunner>();
+        services.AddSingleton<GitSourceIdentityResolver>();
+        services.AddSingleton<TfsSourceIdentityResolver>();
+        services.AddSingleton<ISourceIdentityResolver, ConfiguredSourceIdentityResolver>();
+        services.AddSingleton<GitSourceChangeDetector>();
+        services.AddSingleton<TfsSourceChangeDetector>();
+        services.AddSingleton<ISourceChangeDetector, ConfiguredSourceChangeDetector>();
         services.AddSingleton<IWorkspaceIndexStateStore>(serviceProvider => serviceProvider.GetRequiredService<QdrantWorkspaceIndexStateStore>());
         services.AddSingleton<InMemoryVectorStore>();
         services.AddSingleton<IVectorStore>(serviceProvider => serviceProvider.GetRequiredService<QdrantVectorStore>());

@@ -10,6 +10,8 @@ public sealed class RagNetOptions
 
     public WorkspaceOptions Workspace { get; init; } = new();
 
+    public SourceControlOptions SourceControl { get; init; } = new();
+
     public IReadOnlyList<WorkspaceGroupOptions> WorkspaceGroups { get; init; } = [];
 
     public IndexingOptions Indexing { get; init; } = new();
@@ -26,6 +28,26 @@ public sealed class OllamaOptions
     public bool AllowInstalledEmbeddingModelFallback { get; init; } = false;
 
     public string FallbackEmbeddingModel { get; init; } = "mxbai-embed-large";
+}
+
+public sealed class SourceControlOptions
+{
+    public string ChangeDetector { get; init; } = SourceControlProviders.Auto;
+
+    public string IdentityProvider { get; init; } = SourceControlProviders.Auto;
+
+    public string TfCommand { get; init; } = "tf";
+}
+
+public static class SourceControlProviders
+{
+    public const string Auto = "auto";
+
+    public const string Git = "git";
+
+    public const string Tfs = "tfs";
+
+    public const string None = "none";
 }
 
 public sealed class QdrantOptions
