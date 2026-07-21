@@ -18,6 +18,12 @@ public sealed class QdrantWorkspaceIndexStateStore(
 {
     private const string Distance = "Cosine";
     private const int VectorSize = 1;
+    private const int FilesPerPage = 512;
+    private const int PagePointsPerUpsert = 16;
+    private const int PagePointsPerLoad = 64;
+    private const string ManifestRecordKind = "manifest";
+    private const string FilePageRecordKind = "file_page";
+    private const string PagedStateFormat = "paged";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly RagNetOptions _options = options.Value;
     private readonly HttpClient _httpClient = httpClient;
@@ -54,7 +60,17 @@ public sealed class QdrantWorkspaceIndexStateStore(
 
         foreach (var point in result.EnumerateArray())
         {
-            if (point.TryGetProperty("payload", out var payload) && TryReadState(payload, normalizedWorkspaceRoot, out var state))
+            if (!point.TryGetProperty("payload", out var payload))
+            {
+                continue;
+            }
+
+            if (IsPagedManifest(payload))
+            {
+                return await ReadPagedStateAsync(collectionName, payload, normalizedWorkspaceRoot, cancellationToken);
+            }
+
+            if (TryReadLegacyState(payload, normalizedWorkspaceRoot, out var state))
             {
                 return state;
             }
@@ -70,7 +86,12 @@ public sealed class QdrantWorkspaceIndexStateStore(
 
         var workspaceRoot = NormalizePath(state.WorkspaceRoot);
         var workspaceId = QdrantCollectionNaming.GetWorkspaceId(workspaceRoot);
-        var response = await _httpClient.PutAsJsonAsync(
+        var orderedFiles = state.Files.Values
+            .OrderBy(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var pageCount = (int)Math.Ceiling(orderedFiles.Length / (double)FilesPerPage);
+
+        var manifestResponse = await _httpClient.PutAsJsonAsync(
             $"collections/{Uri.EscapeDataString(collectionName)}/points?wait=true",
             new
             {
@@ -82,6 +103,8 @@ public sealed class QdrantWorkspaceIndexStateStore(
                         vector = new[] { 1f },
                         payload = new
                         {
+                            record_kind = ManifestRecordKind,
+                            state_format = PagedStateFormat,
                             workspace_root = workspaceRoot,
                             workspace_id = workspaceId,
                             embedding_model = state.EmbeddingModel,
@@ -89,17 +112,9 @@ public sealed class QdrantWorkspaceIndexStateStore(
                             saved_at_utc = state.SavedAtUtc,
                             is_complete = state.IsComplete,
                             indexing_collection_name = state.IndexingCollectionName,
-                            files = state.Files.Values
-                                .OrderBy(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
-                                .Select(file => new
-                                {
-                                    file_path = NormalizePath(file.FilePath),
-                                    fingerprint = file.Fingerprint,
-                                    size = file.Size,
-                                    last_write_time_utc = file.LastWriteTimeUtc,
-                                    chunk_count = file.ChunkCount
-                                })
-                                .ToArray()
+                            file_count = orderedFiles.Length,
+                            page_count = pageCount,
+                            page_size = FilesPerPage
                         }
                     }
                 }
@@ -107,7 +122,23 @@ public sealed class QdrantWorkspaceIndexStateStore(
             JsonOptions,
             cancellationToken);
 
-        await EnsureSuccessAsync(response, $"save index state for '{state.WorkspaceRoot}' to Qdrant collection '{collectionName}'", cancellationToken);
+        await EnsureSuccessAsync(manifestResponse, $"save index state manifest for '{state.WorkspaceRoot}' to Qdrant collection '{collectionName}'", cancellationToken);
+
+        foreach (var pointBatch in CreateFilePagePoints(workspaceId, workspaceRoot, state, orderedFiles)
+            .Chunk(PagePointsPerUpsert))
+        {
+            var pageResponse = await _httpClient.PutAsJsonAsync(
+                $"collections/{Uri.EscapeDataString(collectionName)}/points?wait=true",
+                new
+                {
+                    points = pointBatch
+                },
+                JsonOptions,
+                cancellationToken);
+
+            await EnsureSuccessAsync(pageResponse, $"save index state pages for '{state.WorkspaceRoot}' to Qdrant collection '{collectionName}'", cancellationToken);
+        }
+
         logger.LogInformation("Saved index state for {WorkspaceRoot} in Qdrant collection {CollectionName}.", workspaceRoot, collectionName);
     }
 
@@ -119,12 +150,25 @@ public sealed class QdrantWorkspaceIndexStateStore(
             return;
         }
 
-        var workspaceId = QdrantCollectionNaming.GetWorkspaceId(workspaceRoot);
+        var workspaceId = QdrantCollectionNaming.GetWorkspaceId(NormalizePath(workspaceRoot));
         var response = await _httpClient.PostAsJsonAsync(
             $"collections/{Uri.EscapeDataString(collectionName)}/points/delete?wait=true",
             new
             {
-                points = new[] { CreatePointId(workspaceId) }
+                filter = new
+                {
+                    must = new[]
+                    {
+                        new
+                        {
+                            key = "workspace_id",
+                            match = new
+                            {
+                                value = workspaceId
+                            }
+                        }
+                    }
+                }
             },
             JsonOptions,
             cancellationToken);
@@ -181,7 +225,121 @@ public sealed class QdrantWorkspaceIndexStateStore(
         return $"{(string.IsNullOrWhiteSpace(prefix) ? "ragnet" : prefix)}-index-state";
     }
 
-    private static bool TryReadState(JsonElement payload, string fallbackWorkspaceRoot, out WorkspaceIndexState state)
+    private async Task<WorkspaceIndexState> ReadPagedStateAsync(
+        string collectionName,
+        JsonElement manifestPayload,
+        string fallbackWorkspaceRoot,
+        CancellationToken cancellationToken)
+    {
+        var workspaceRoot = GetString(manifestPayload, "workspace_root");
+        if (string.IsNullOrWhiteSpace(workspaceRoot))
+        {
+            workspaceRoot = fallbackWorkspaceRoot;
+        }
+
+        workspaceRoot = NormalizePath(workspaceRoot);
+        var workspaceId = GetString(manifestPayload, "workspace_id");
+        if (string.IsNullOrWhiteSpace(workspaceId))
+        {
+            workspaceId = QdrantCollectionNaming.GetWorkspaceId(workspaceRoot);
+        }
+
+        var pageCount = GetInt32(manifestPayload, "page_count");
+        var files = new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pageIds in Enumerable.Range(0, pageCount)
+            .Select(pageIndex => CreatePagePointId(workspaceId, pageIndex))
+            .Chunk(PagePointsPerLoad))
+        {
+            var response = await _httpClient.PostAsJsonAsync(
+                $"collections/{Uri.EscapeDataString(collectionName)}/points",
+                new
+                {
+                    ids = pageIds,
+                    with_payload = true,
+                    with_vector = false
+                },
+                JsonOptions,
+                cancellationToken);
+
+            await EnsureSuccessAsync(response, $"load index state pages for '{workspaceRoot}' from Qdrant collection '{collectionName}'", cancellationToken);
+
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            if (!document.RootElement.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (var point in result.EnumerateArray())
+            {
+                if (!point.TryGetProperty("payload", out var pagePayload) ||
+                    !string.Equals(GetString(pagePayload, "record_kind"), FilePageRecordKind, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                foreach (var file in ReadFileStates(pagePayload))
+                {
+                    files[file.FilePath] = file;
+                }
+            }
+        }
+
+        return new WorkspaceIndexState(
+            workspaceRoot,
+            files,
+            GetNullableString(manifestPayload, "embedding_model"),
+            IndexSchemaVersions.ReadPayloadVersion(manifestPayload),
+            GetNullableDateTimeOffset(manifestPayload, "saved_at_utc"),
+            StateExists: true,
+            IsComplete: GetNullableBool(manifestPayload, "is_complete") ?? true,
+            IndexingCollectionName: GetNullableString(manifestPayload, "indexing_collection_name"));
+    }
+
+    private static IEnumerable<object> CreateFilePagePoints(
+        string workspaceId,
+        string workspaceRoot,
+        WorkspaceIndexState state,
+        IReadOnlyList<IndexedFileState> orderedFiles)
+    {
+        var pageIndex = 0;
+        foreach (var page in orderedFiles.Chunk(FilesPerPage))
+        {
+            yield return new
+            {
+                id = CreatePagePointId(workspaceId, pageIndex),
+                vector = new[] { 1f },
+                payload = new
+                {
+                    record_kind = FilePageRecordKind,
+                    state_format = PagedStateFormat,
+                    workspace_root = workspaceRoot,
+                    workspace_id = workspaceId,
+                    embedding_model = state.EmbeddingModel,
+                    schema_version = IndexSchemaVersions.Current,
+                    saved_at_utc = state.SavedAtUtc,
+                    page_index = pageIndex,
+                    page_size = FilesPerPage,
+                    files = page.Select(file => new
+                    {
+                        file_path = NormalizePath(file.FilePath),
+                        fingerprint = file.Fingerprint,
+                        size = file.Size,
+                        last_write_time_utc = file.LastWriteTimeUtc,
+                        chunk_count = file.ChunkCount
+                    }).ToArray()
+                }
+            };
+
+            pageIndex++;
+        }
+    }
+
+    private static bool IsPagedManifest(JsonElement payload)
+        => string.Equals(GetString(payload, "state_format"), PagedStateFormat, StringComparison.Ordinal) &&
+            string.Equals(GetString(payload, "record_kind"), ManifestRecordKind, StringComparison.Ordinal);
+
+    private static bool TryReadLegacyState(JsonElement payload, string fallbackWorkspaceRoot, out WorkspaceIndexState state)
     {
         var workspaceRoot = GetString(payload, "workspace_root");
         if (string.IsNullOrWhiteSpace(workspaceRoot))
@@ -189,13 +347,8 @@ public sealed class QdrantWorkspaceIndexStateStore(
             workspaceRoot = fallbackWorkspaceRoot;
         }
 
-        var files = payload.TryGetProperty("files", out var fileElements) && fileElements.ValueKind == JsonValueKind.Array
-            ? fileElements.EnumerateArray()
-                .Select(TryReadFileState)
-                .Where(file => file is not null)
-                .Select(file => file!)
-                .ToDictionary(file => file.FilePath, file => file, StringComparer.OrdinalIgnoreCase)
-            : new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase);
+        var files = ReadFileStates(payload)
+            .ToDictionary(file => file.FilePath, file => file, StringComparer.OrdinalIgnoreCase);
 
         state = new WorkspaceIndexState(
             NormalizePath(workspaceRoot),
@@ -207,6 +360,23 @@ public sealed class QdrantWorkspaceIndexStateStore(
             IsComplete: GetNullableBool(payload, "is_complete") ?? true,
             IndexingCollectionName: GetNullableString(payload, "indexing_collection_name"));
         return true;
+    }
+
+    private static IEnumerable<IndexedFileState> ReadFileStates(JsonElement payload)
+    {
+        if (!payload.TryGetProperty("files", out var fileElements) || fileElements.ValueKind != JsonValueKind.Array)
+        {
+            yield break;
+        }
+
+        foreach (var fileElement in fileElements.EnumerateArray())
+        {
+            var file = TryReadFileState(fileElement);
+            if (file is not null)
+            {
+                yield return file;
+            }
+        }
     }
 
     private static IndexedFileState? TryReadFileState(JsonElement element)
@@ -238,6 +408,14 @@ public sealed class QdrantWorkspaceIndexStateStore(
     private static string CreatePointId(string workspaceId)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes($"index-state:{workspaceId}"));
+        hash[6] = (byte)((hash[6] & 0x0F) | 0x50);
+        hash[8] = (byte)((hash[8] & 0x3F) | 0x80);
+        return new Guid(hash.AsSpan(0, 16)).ToString("D");
+    }
+
+    private static string CreatePagePointId(string workspaceId, int pageIndex)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes($"index-state:{workspaceId}:page:{pageIndex}"));
         hash[6] = (byte)((hash[6] & 0x0F) | 0x50);
         hash[8] = (byte)((hash[8] & 0x3F) | 0x80);
         return new Guid(hash.AsSpan(0, 16)).ToString("D");
