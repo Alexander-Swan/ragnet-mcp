@@ -56,8 +56,8 @@ docker volume inspect ragnet-mcp_qdrant_storage
 For full-instance backup and restore, prefer Qdrant snapshots. For moving one indexed workspace or product group between Qdrant deployments, use the local indexer workspace export commands:
 
 ```powershell
-.\bin\ragnet-indexer.exe workspace export Api --output D:\Backups\ragnet-api
-.\bin\ragnet-indexer.exe group export my-product --output D:\Backups\ragnet-product
+.\bin\ragnet-indexer.exe workspace export Api -o D:\Backups\ragnet-api
+.\bin\ragnet-indexer.exe group export my-product -o D:\Backups\ragnet-product
 ```
 
 Exports write a versioned `ragnet-export-manifest.json` plus JSONL Qdrant point dumps that include vectors and payloads. The manifest records workspace root, repository root when known, remote URL, branch, commit SHA, indexed targets, relative target paths, groups, index state, vector collection name, and vector size.
@@ -65,19 +65,19 @@ Exports write a versioned `ragnet-export-manifest.json` plus JSONL Qdrant point 
 Import a single workspace by mapping the exported relative paths to a new local root:
 
 ```powershell
-.\bin\ragnet-indexer.exe workspace import --input D:\Backups\ragnet-api --workspace-root E:\Repos\Product\Api
+.\bin\ragnet-indexer.exe workspace import -i D:\Backups\ragnet-api --root E:\Repos\Product\Api
 ```
 
 Import a group with one or more root maps:
 
 ```powershell
-.\bin\ragnet-indexer.exe group import D:\Backups\ragnet-product --path-map D:\Work\Product=E:\Repos\Product
+.\bin\ragnet-indexer.exe group import -i D:\Backups\ragnet-product --path-map D:\Work\Product=E:\Repos\Product
 ```
 
 Use `workspace collection` to resolve a local path, workspace, or group to its Qdrant collection:
 
 ```powershell
-.\bin\ragnet-indexer.exe workspace collection --path E:\Repos\Product\Api\Api.sln
+.\bin\ragnet-indexer.exe workspace collection E:\Repos\Product\Api\Api.sln
 .\bin\ragnet-indexer.exe workspace collection --group my-product
 ```
 
@@ -169,7 +169,7 @@ Use `get_index_status` with a file or directory inside a workspace to inspect wh
 Use the local indexer to inspect the Qdrant persistence surface directly:
 
 ```powershell
-.\bin\ragnet-indexer.exe status qdrant
+.\bin\ragnet-indexer.exe qdrant status
 ```
 
 This prints the configured Qdrant URL, collection prefix, collection counts, registered workspace count, index-state count, and an approximate vector count when Qdrant exposes point counts.
@@ -198,18 +198,20 @@ Agents can trigger indexing through the `trigger_indexing` MCP tool. Humans, scr
 .\bin\ragnet-indexer.exe index -w "D:\Work\Product\Api\Api.sln" -w "D:\Work\Product\docs\api"
 .\bin\ragnet-indexer.exe index -w "D:\Work\Product\Worker" -g my-product -a
 .\bin\ragnet-indexer.exe index --group my-product
-.\bin\ragnet-indexer.exe create group my-product -w Api -w Admin
-.\bin\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
-.\bin\ragnet-indexer.exe status qdrant
-.\bin\ragnet-indexer.exe list groups
-.\bin\ragnet-indexer.exe list workspaces
-.\bin\ragnet-indexer.exe delete group my-product
-.\bin\ragnet-indexer.exe delete workspace "D:\Work\Product\Api"
+.\bin\ragnet-indexer.exe group create my-product -w Api -w Admin
+.\bin\ragnet-indexer.exe workspace status Api
+.\bin\ragnet-indexer.exe qdrant status
+.\bin\ragnet-indexer.exe group list
+.\bin\ragnet-indexer.exe workspace list
+.\bin\ragnet-indexer.exe group delete my-product
+.\bin\ragnet-indexer.exe workspace delete Api
 ```
 
-The CLI prints progress for each indexing phase to stderr and leaves index/status/delete results on stdout for scripts. Pass `--no-progress` to suppress progress output. Add `--dry-run` to `index` to preview the resolved workspace root, target paths, scanned files, chunks that would be indexed, state compatibility, and changed/deleted/unchanged file counts without deleting vectors, creating embeddings, saving index state, updating the workspace registry, or writing local groups. `--workspace`/`-w` is an index target: a workspace root, subdirectory, solution file, or supported file. Use `--current`/`-c` to add the current directory as a target. If no target is provided and the current directory is inside an already indexed workspace, the CLI reindexes that workspace incrementally. Repeating targets unions all compatible targets; for example, two solution files in the same repo index only those solution graphs, not unrelated sibling solutions. Pairing `--workspace` or `--current` with `--group`/`-g` saves that target set to `.ragnet/indexer-workspace-groups.json` in the current directory, so future runs can use `index --group my-product`. Use `create group <name> -w <indexed-workspace-name-or-root>` to create or replace a local group from already indexed workspaces without running indexing. Add `--add` or `-a` to append new targets to an existing local group instead of replacing it.
+The CLI prints progress for each indexing phase to stderr and leaves index/status/delete results on stdout for scripts. Pass `--no-progress` to suppress progress output. Add `--dry-run` to `index` to preview the resolved workspace root, target paths, scanned files, chunks that would be indexed, state compatibility, and changed/deleted/unchanged file counts without deleting vectors, creating embeddings, saving index state, updating the workspace registry, or writing local groups. `--workspace`/`-w` is an index target: a workspace root, subdirectory, solution file, or supported file. Use `--current`/`-c` to add the current directory as a target. If no target is provided and the current directory is inside an already indexed workspace, the CLI reindexes that workspace incrementally. Repeating targets unions all compatible targets; for example, two solution files in the same repo index only those solution graphs, not unrelated sibling solutions. Pairing `--workspace` or `--current` with `--group`/`-g` saves that target set to `.ragnet/indexer-workspace-groups.json` in the current directory, so future runs can use `index --group my-product`. Use `group create <name> -w <indexed-workspace-name-or-root>` to create or replace a local group from already indexed workspaces without running indexing. Use `group add <name> -w <indexed-workspace-name-or-root>` to append targets to an existing group.
 
-Use `list groups` to see configured and local indexer groups in a table. Use `list workspaces` to see indexed workspaces from the Qdrant registry in a table. `delete group` removes local indexer groups; configured groups are read-only from the CLI and should be removed from configuration. `delete workspace` removes the workspace vector collection, Qdrant registry record, Qdrant index-state point, and any incomplete indexing collection recorded in state. For an interrupted first index that has no registry record yet, pass the full workspace root.
+Use `group list` to see configured and local indexer groups in a table. Use `workspace list` to see indexed workspaces from the Qdrant registry in a table. `group delete` removes local indexer groups; configured groups are read-only from the CLI and should be removed from configuration. `workspace delete` removes the workspace vector collection, Qdrant registry record, Qdrant index-state point, and any incomplete indexing collection recorded in state. For an interrupted first index that has no registry record yet, pass the full workspace root.
+
+Most command nouns have scoped help. Use `ragnet-indexer workspace --help`, `ragnet-indexer workspace export --help`, `ragnet-indexer group --help`, `ragnet-indexer index --help`, `ragnet-indexer qdrant --help`, `ragnet-indexer profile --help`, or `ragnet-indexer eval --help`.
 
 The indexer is intended to run where source files are accessible: directly on a developer machine for local projects, or in CI/webhook workers after checking out a repository. The web MCP/search service remains HTTP-based and queries Qdrant.
 
@@ -218,7 +220,7 @@ The indexer is intended to run where source files are accessible: directly on a 
 Run a search eval suite against the existing search pipeline with:
 
 ```powershell
-.\bin\ragnet-indexer.exe eval --queries eval.json --workspace-root "D:\Work\Product\Api" --limit 10 --hybrid
+.\bin\ragnet-indexer.exe eval -q eval.json --workspace-root "D:\Work\Product\Api" --limit 10 --hybrid
 ```
 
 `eval` prints JSON containing aggregate metrics and per-query ranked results. It exits `0` when every query has a matching result and `2` when one or more queries miss, which makes it suitable for CI thresholds or local regression checks. The command uses `IWorkspaceIndexer.SearchAsync`; it does not duplicate retrieval logic.

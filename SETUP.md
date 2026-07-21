@@ -336,16 +336,19 @@ Dry-run output includes the resolved workspace root, target paths, scanned file 
 List local indexer groups and indexed workspaces as tables, or remove them:
 
 ```powershell
-.\bin\ragnet-indexer.exe list groups
-.\bin\ragnet-indexer.exe list workspaces
-.\bin\ragnet-indexer.exe create group my-product -w Api -w Admin
-.\bin\ragnet-indexer.exe delete group my-product
-.\bin\ragnet-indexer.exe delete workspace "D:\Work\Product\Api"
+.\bin\ragnet-indexer.exe group list
+.\bin\ragnet-indexer.exe workspace list
+.\bin\ragnet-indexer.exe group create my-product -w Api -w Admin
+.\bin\ragnet-indexer.exe group add my-product -w Worker
+.\bin\ragnet-indexer.exe group delete my-product
+.\bin\ragnet-indexer.exe workspace delete Api
 ```
 
-`create group <name>` creates or replaces a local group from workspaces that already exist in the Qdrant workspace registry. Use indexed workspace names from `list workspaces`, full indexed workspace roots, or `--current` when the current directory is inside an indexed workspace. Add `--add`/`-a` to append to an existing local group.
+`group create <name>` creates or replaces a local group from workspaces that already exist in the Qdrant workspace registry. Use indexed workspace names from `workspace list`, full indexed workspace roots, or `--current` when the current directory is inside an indexed workspace. Use `group add <name>` to append to an existing local group.
 
-Configured groups are listed as read-only. `delete workspace` removes the Qdrant vector collection, Qdrant registry record, Qdrant index-state point, and any incomplete indexing collection recorded in state. For an interrupted first index that has no registry record yet, pass the full workspace root.
+Configured groups are listed as read-only. `workspace delete` removes the Qdrant vector collection, Qdrant registry record, Qdrant index-state point, and any incomplete indexing collection recorded in state. For an interrupted first index that has no registry record yet, pass the full workspace root.
+
+Most command nouns have scoped help. Use `.\bin\ragnet-indexer.exe workspace --help`, `.\bin\ragnet-indexer.exe workspace export --help`, `.\bin\ragnet-indexer.exe group --help`, `.\bin\ragnet-indexer.exe index --help`, `.\bin\ragnet-indexer.exe qdrant --help`, `.\bin\ragnet-indexer.exe profile --help`, or `.\bin\ragnet-indexer.exe eval --help`.
 
 The indexer prints progress to stderr and writes index/status/delete results to stdout. For quiet automation:
 
@@ -362,13 +365,13 @@ Indexing is resumable at checkpoint boundaries. RagNet saves an incomplete check
 Check index state:
 
 ```powershell
-.\bin\ragnet-indexer.exe status --workspace "D:\Work\Product\Api"
+.\bin\ragnet-indexer.exe workspace status Api
 ```
 
 Check Qdrant persistence and collection counts:
 
 ```powershell
-.\bin\ragnet-indexer.exe status qdrant
+.\bin\ragnet-indexer.exe qdrant status
 ```
 
 This prints the configured Qdrant URL, collection prefix, total and matching collection counts, registered workspace count, index-state point count, and an approximate vector count when Qdrant exposes point counts.
@@ -376,23 +379,23 @@ This prints the configured Qdrant URL, collection prefix, total and matching col
 Resolve a local directory, file, solution, workspace, or group to Qdrant collection names:
 
 ```powershell
-.\bin\ragnet-indexer.exe workspace collection --path "D:\Work\Product\Api\Api.sln"
-.\bin\ragnet-indexer.exe workspace collection --workspace Api
+.\bin\ragnet-indexer.exe workspace collection "D:\Work\Product\Api\Api.sln"
+.\bin\ragnet-indexer.exe workspace collection Api
 .\bin\ragnet-indexer.exe workspace collection --group my-product
 ```
 
 Export/import indexed workspace data without a full reindex when the exported vectors remain valid for the same embedding model:
 
 ```powershell
-.\bin\ragnet-indexer.exe workspace export Api --output D:\Backups\ragnet-api
-.\bin\ragnet-indexer.exe workspace import --input D:\Backups\ragnet-api --workspace-root E:\Repos\Product\Api
+.\bin\ragnet-indexer.exe workspace export Api -o D:\Backups\ragnet-api
+.\bin\ragnet-indexer.exe workspace import -i D:\Backups\ragnet-api --root E:\Repos\Product\Api
 ```
 
 For product groups:
 
 ```powershell
-.\bin\ragnet-indexer.exe group export my-product --output D:\Backups\ragnet-product
-.\bin\ragnet-indexer.exe group import D:\Backups\ragnet-product --path-map D:\Work\Product=E:\Repos\Product
+.\bin\ragnet-indexer.exe group export my-product -o D:\Backups\ragnet-product
+.\bin\ragnet-indexer.exe group import -i D:\Backups\ragnet-product --path-map D:\Work\Product=E:\Repos\Product
 ```
 
 The export directory contains a versioned `ragnet-export-manifest.json` and `collections/*.jsonl` point dumps with Qdrant point ids, vectors, and payloads. The manifest includes workspace root, repository root when known, remote URL, branch, commit SHA, indexed targets, relative target paths, group records, index state, vector collection name, and vector size. `workspace import` accepts `--workspace-root` for a single workspace export. `group import` accepts repeated `--path-map <exported-root=new-root>` values so exported absolute roots can be recreated under a new checkout root.

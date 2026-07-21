@@ -129,13 +129,12 @@ static async Task<int> RunAsync(
         return args.Length == 0 ? 1 : 0;
     }
 
-    var command = args[0].Trim().ToLowerInvariant();
-    if (command is "profiles" or "profile" or "--profile" or "-p")
+    if (TryWriteScopedHelp(args))
     {
-        WriteProfilesTable();
         return 0;
     }
 
+    var command = args[0].Trim().ToLowerInvariant();
     var optionStart = GetOptionStart(command, args);
     var options = ParseOptions(args.Skip(optionStart));
     var progress = GetBool(options, "no-progress")
@@ -208,24 +207,6 @@ static async Task<int> RunAsync(
             return 0;
         }
 
-        case "status":
-        {
-            var target = args.Length > 1 && !args[1].StartsWith("-", StringComparison.Ordinal) && !IsHelp(args[1])
-                ? args[1].Trim().ToLowerInvariant()
-                : "workspace";
-            if (target == "qdrant")
-            {
-                var qdrantStatus = await GetQdrantStatusAsync(ragNetOptions, workspaceRegistry);
-                Console.WriteLine(JsonSerializer.Serialize(qdrantStatus, jsonOptions));
-                return 0;
-            }
-
-            var workspace = await ResolveLocalWorkspaceTargetPathAsync(Required(options, "workspace"), workspaceRegistry);
-            var workspaceStatus = await indexer.GetStatusAsync(workspace);
-            Console.WriteLine(JsonSerializer.Serialize(workspaceStatus, jsonOptions));
-            return 0;
-        }
-
         case "eval":
         {
             var evalWorkspaceRoot = GetString(options, "workspace-root") ?? GetString(options, "workspace");
@@ -249,83 +230,32 @@ static async Task<int> RunAsync(
             return result.Metrics.PassedQueries == result.Metrics.TotalQueries ? 0 : 2;
         }
 
-        case "list":
+        case "workspace":
         {
-            var target = RequiredListTarget(args);
-            switch (target)
+            var action = RequiredSubcommand(args, "workspace");
+            switch (action)
             {
-                case "profiles":
-                case "profile":
-                    WriteProfilesTable();
-                    return 0;
-
-                case "groups":
-                    WriteGroupsTable(await workspaceGroupRegistry.GetGroupsAsync());
-                    return 0;
-
-                case "workspaces":
+                case "list":
                     WriteWorkspacesTable(await workspaceRegistry.GetIndexedWorkspacesAsync());
                     return 0;
 
-                default:
-                    throw new ArgumentException("List target must be one of: groups, profiles, workspaces.");
-            }
-        }
-
-        case "delete":
-        {
-            var target = RequiredListTarget(args);
-            switch (target)
-            {
-                case "group":
-                case "groups":
-                    Console.WriteLine(JsonSerializer.Serialize(await DeleteWorkspaceGroupAsync(
-                        GetDeleteSubject(args, options, "group"),
-                        workspaceGroupRegistry), jsonOptions));
+                case "status":
+                {
+                    var workspace = await ResolveLocalWorkspaceTargetPathAsync(GetWorkspaceCommandSubject(args, options, "workspace"), workspaceRegistry);
+                    var workspaceStatus = await indexer.GetStatusAsync(workspace);
+                    Console.WriteLine(JsonSerializer.Serialize(workspaceStatus, jsonOptions));
                     return 0;
+                }
 
-                case "workspace":
-                case "workspaces":
+                case "delete":
                     Console.WriteLine(JsonSerializer.Serialize(await DeleteIndexedWorkspaceAsync(
-                        GetDeleteSubject(args, options, "workspace"),
+                        GetWorkspaceCommandSubject(args, options, "workspace"),
                         workspaceRegistry,
                         vectorStore,
                         stateStore,
                         ragNetOptions), jsonOptions));
                     return 0;
 
-                default:
-                    throw new ArgumentException("Delete target must be one of: group, workspace.");
-            }
-        }
-
-        case "create":
-        {
-            var target = RequiredListTarget(args);
-            switch (target)
-            {
-                case "group":
-                case "groups":
-                    var groupName = GetCommandSubject(args, options, "group");
-                    var targets = await ResolveGroupWorkspaceTargetsAsync(options, workspaceRegistry);
-                    Console.WriteLine(JsonSerializer.Serialize(await SaveWorkspaceGroupAsync(
-                        groupName,
-                        targets,
-                        GetBool(options, "add"),
-                        workspaceRegistry,
-                        workspaceGroupRegistry), jsonOptions));
-                    return 0;
-
-                default:
-                    throw new ArgumentException("Create target must be: group.");
-            }
-        }
-
-        case "workspace":
-        {
-            var action = RequiredListTarget(args);
-            switch (action)
-            {
                 case "export":
                 {
                     var output = Required(options, "output");
@@ -336,19 +266,12 @@ static async Task<int> RunAsync(
                 }
 
                 case "import":
-                {
-                    var input = GetString(options, "input") ??
-                        (args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal) && !IsHelp(args[2])
-                            ? args[2]
-                            : null) ??
-                        throw new ArgumentException("--input is required.");
                     Console.WriteLine(JsonSerializer.Serialize(await transferService.ImportAsync(
-                        input,
+                        Required(options, "input"),
                         ParsePathMap(GetMany(options, "path-map")),
-                        GetString(options, "workspace-root"),
+                        GetString(options, "workspace-root") ?? GetString(options, "root"),
                         expectedKind: "workspace"), jsonOptions));
                     return 0;
-                }
 
                 case "migrate":
                 {
@@ -357,14 +280,14 @@ static async Task<int> RunAsync(
                 }
 
                 case "adopt":
-                case "recover":
                 {
                     var workspaceRoot = GetString(options, "workspace-root") ??
+                        GetString(options, "root") ??
                         GetString(options, "workspace") ??
                         (args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal) && !IsHelp(args[2])
                             ? args[2]
                             : null) ??
-                        throw new ArgumentException("--workspace-root is required.");
+                        throw new ArgumentException("workspace adopt requires a workspace root.");
                     Console.WriteLine(JsonSerializer.Serialize(await transferService.RecoverWorkspaceAsync(
                         workspaceRoot,
                         GetMany(options, "target"),
@@ -373,27 +296,71 @@ static async Task<int> RunAsync(
                 }
 
                 case "collection":
-                case "collections":
                 {
+                    var positionalTarget =
+                        (args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal) && !IsHelp(args[2])
+                            ? args[2]
+                            : null);
+                    var workspaceTarget = GetString(options, "workspace");
+                    var pathTarget = GetString(options, "path") ?? GetString(options, "file");
+                    if (!string.IsNullOrWhiteSpace(positionalTarget) &&
+                        string.IsNullOrWhiteSpace(workspaceTarget) &&
+                        string.IsNullOrWhiteSpace(pathTarget) &&
+                        string.IsNullOrWhiteSpace(GetString(options, "group")))
+                    {
+                        if (Path.Exists(positionalTarget))
+                        {
+                            pathTarget = positionalTarget;
+                        }
+                        else
+                        {
+                            workspaceTarget = positionalTarget;
+                        }
+                    }
+
                     var collectionStatus = await transferService.ResolveCollectionsAsync(
-                        GetString(options, "workspace"),
+                        workspaceTarget,
                         GetString(options, "group"),
-                        GetString(options, "path") ?? GetString(options, "file"),
+                        pathTarget,
                         cancellationToken: default);
                     Console.WriteLine(JsonSerializer.Serialize(collectionStatus, jsonOptions));
                     return 0;
                 }
 
                 default:
-                    throw new ArgumentException("Workspace command must be one of: adopt, collection, export, import, migrate, recover.");
+                    throw new ArgumentException("Workspace command must be one of: adopt, collection, delete, export, import, list, migrate, status.");
             }
         }
 
         case "group":
         {
-            var action = RequiredListTarget(args);
+            var action = RequiredSubcommand(args, "group");
             switch (action)
             {
+                case "list":
+                    WriteGroupsTable(await workspaceGroupRegistry.GetGroupsAsync());
+                    return 0;
+
+                case "create":
+                case "add":
+                {
+                    var groupName = GetWorkspaceCommandSubject(args, options, "group");
+                    var targets = await ResolveGroupWorkspaceTargetsAsync(options, workspaceRegistry);
+                    Console.WriteLine(JsonSerializer.Serialize(await SaveWorkspaceGroupAsync(
+                        groupName,
+                        targets,
+                        add: action == "add" || GetBool(options, "add"),
+                        workspaceRegistry,
+                        workspaceGroupRegistry), jsonOptions));
+                    return 0;
+                }
+
+                case "delete":
+                    Console.WriteLine(JsonSerializer.Serialize(await DeleteWorkspaceGroupAsync(
+                        GetWorkspaceCommandSubject(args, options, "group"),
+                        workspaceGroupRegistry), jsonOptions));
+                    return 0;
+
                 case "export":
                     Console.WriteLine(JsonSerializer.Serialize(await transferService.ExportGroupAsync(
                         GetWorkspaceCommandSubject(args, options, "group"),
@@ -401,22 +368,40 @@ static async Task<int> RunAsync(
                     return 0;
 
                 case "import":
-                {
-                    var input = GetString(options, "input") ??
-                        (args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal) && !IsHelp(args[2])
-                            ? args[2]
-                            : null) ??
-                        throw new ArgumentException("--input is required.");
                     Console.WriteLine(JsonSerializer.Serialize(await transferService.ImportAsync(
-                        input,
+                        Required(options, "input"),
                         ParsePathMap(GetMany(options, "path-map")),
                         expectedKind: "group"), jsonOptions));
                     return 0;
-                }
 
                 default:
-                    throw new ArgumentException("Group command must be one of: export, import.");
+                    throw new ArgumentException("Group command must be one of: add, create, delete, export, import, list.");
             }
+        }
+
+        case "qdrant":
+        {
+            var action = RequiredSubcommand(args, "qdrant");
+            if (action != "status")
+            {
+                throw new ArgumentException("Qdrant command must be: status.");
+            }
+
+            var qdrantStatus = await GetQdrantStatusAsync(ragNetOptions, workspaceRegistry);
+            Console.WriteLine(JsonSerializer.Serialize(qdrantStatus, jsonOptions));
+            return 0;
+        }
+
+        case "profile":
+        {
+            var action = RequiredSubcommand(args, "profile");
+            if (action != "list")
+            {
+                throw new ArgumentException("Profile command must be: list.");
+            }
+
+            WriteProfilesTable();
+            return 0;
         }
 
         default:
@@ -428,33 +413,23 @@ static async Task<int> RunAsync(
 
 static int GetOptionStart(string command, string[] args)
 {
-    if (command == "list")
+    if (command == "eval" || command == "index")
+    {
+        return 1;
+    }
+
+    if (command is "qdrant" or "profile")
     {
         return 2;
     }
 
-    if (command is "delete" or "create")
-    {
-        return args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal)
-            ? 3
-            : 2;
-    }
-
-    if ((command == "workspace" || command == "group") &&
+    if (command == "workspace" &&
         args.Length > 1 &&
         !args[1].StartsWith("-", StringComparison.Ordinal) &&
         !IsHelp(args[1]))
     {
         var action = args[1].Trim().ToLowerInvariant();
-        if (action is "export" &&
-            args.Length > 2 &&
-            !args[2].StartsWith("-", StringComparison.Ordinal) &&
-            !IsHelp(args[2]))
-        {
-            return 3;
-        }
-
-        if (action is "import" or "adopt" or "recover" &&
+        if (action is "adopt" or "collection" or "delete" or "export" or "status" &&
             args.Length > 2 &&
             !args[2].StartsWith("-", StringComparison.Ordinal) &&
             !IsHelp(args[2]))
@@ -465,38 +440,34 @@ static int GetOptionStart(string command, string[] args)
         return 2;
     }
 
-    if (command == "status" &&
+    if (command == "group" &&
         args.Length > 1 &&
         !args[1].StartsWith("-", StringComparison.Ordinal) &&
         !IsHelp(args[1]))
     {
+        var action = args[1].Trim().ToLowerInvariant();
+        if (action is "add" or "create" or "delete" or "export" &&
+            args.Length > 2 &&
+            !args[2].StartsWith("-", StringComparison.Ordinal) &&
+            !IsHelp(args[2]))
+        {
+            return 3;
+        }
+
         return 2;
     }
 
     return 1;
 }
 
-static string RequiredListTarget(string[] args)
+static string RequiredSubcommand(string[] args, string command)
 {
     if (args.Length < 2 || args[1].StartsWith("-", StringComparison.Ordinal) || IsHelp(args[1]))
     {
-        throw new ArgumentException("Command target is required.");
+        throw new ArgumentException($"{command} command requires a subcommand.");
     }
 
     return args[1].Trim().ToLowerInvariant();
-}
-
-static string GetDeleteSubject(string[] args, Dictionary<string, List<string>> options, string optionName)
-    => GetCommandSubject(args, options, optionName);
-
-static string GetCommandSubject(string[] args, Dictionary<string, List<string>> options, string optionName)
-{
-    if (args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(args[2]))
-    {
-        return args[2];
-    }
-
-    return Required(options, optionName);
 }
 
 static string GetWorkspaceCommandSubject(string[] args, Dictionary<string, List<string>> options, string optionName)
@@ -569,6 +540,9 @@ static string NormalizeOptionName(string name)
         "p" => "profile",
         "e" => "exclude",
         "f" => "force",
+        "o" => "output",
+        "i" => "input",
+        "q" => "queries",
         _ => name
     };
 
@@ -633,6 +607,50 @@ static IReadOnlyDictionary<string, string> ParsePathMap(IReadOnlyList<string>? v
 
 static bool IsHelp(string value)
     => value is "-h" or "--help" or "help";
+
+static bool TryWriteScopedHelp(string[] args)
+{
+    if (args.Length < 2 || !args.Skip(1).Any(IsHelp))
+    {
+        return false;
+    }
+
+    var command = args[0].Trim().ToLowerInvariant();
+    var subcommand = args.Skip(1)
+        .FirstOrDefault(arg => !IsHelp(arg) && !arg.StartsWith("-", StringComparison.Ordinal))?
+        .Trim()
+        .ToLowerInvariant();
+
+    switch (command)
+    {
+        case "index":
+            WriteIndexHelp();
+            return true;
+
+        case "workspace":
+            WriteWorkspaceHelp(subcommand);
+            return true;
+
+        case "group":
+            WriteGroupHelp(subcommand);
+            return true;
+
+        case "qdrant":
+            WriteQdrantHelp();
+            return true;
+
+        case "profile":
+            WriteProfileHelp();
+            return true;
+
+        case "eval":
+            WriteEvalHelp();
+            return true;
+
+        default:
+            return false;
+    }
+}
 
 static async Task<IReadOnlyList<string>> ResolveIndexWorkspaceTargetsAsync(
     Dictionary<string, List<string>> options,
@@ -726,7 +744,7 @@ static string ResolveIndexedWorkspaceTarget(string target, IReadOnlyList<Indexed
     return matches.Length switch
     {
         1 => matches[0].WorkspaceRoot,
-        0 => throw new InvalidOperationException($"Indexed workspace '{trimmed}' was not found. Use 'list workspaces' to see available workspaces."),
+        0 => throw new InvalidOperationException($"Indexed workspace '{trimmed}' was not found. Use 'workspace list' to see available workspaces."),
         _ => throw new InvalidOperationException($"Workspace name '{trimmed}' matches {matches.Length} indexed workspaces. Use a full workspace root.")
     };
 }
@@ -1267,6 +1285,277 @@ static JsonSerializerOptions JsonOptions()
         WriteIndented = true
     };
 
+static void WriteIndexHelp()
+{
+    Console.WriteLine("""
+    RagNet Indexer - index
+
+    Usage:
+      ragnet-indexer index --workspace|-w <target> [--workspace|-w <target> ...] [options]
+      ragnet-indexer index --current|-c [options]
+      ragnet-indexer index --group|-g <name> [options]
+
+    Targets:
+      --workspace, -w <target>  Workspace root, directory, solution file, or supported file. Repeat to union targets.
+      --current, -c             Use the current directory as the target.
+      --group, -g <name>        With targets, save/replace a group. Without targets, index an existing group.
+
+    Options:
+      --add, -a                 Append targets to an existing group instead of replacing it.
+      --force                   Force a full reindex for compatible full-workspace targets.
+      --dry-run                 Preview files/chunks without writing vectors, state, registry records, or groups.
+      --profile <profile>       all, code, docs, metadata, frontend, or tests. Default is all.
+      --exclude, -e <path>      Exclude directory name or relative path. Repeat or pass comma/semicolon-separated values.
+      --no-progress             Suppress progress output.
+
+    Examples:
+      ragnet-indexer index -w D:\Work\Product\Api\Api.sln
+      ragnet-indexer index -w D:\Work\Product\Api\Api.sln -w D:\Work\Product\Admin\Admin.sln -g my-product
+      ragnet-indexer index -g my-product --dry-run
+    """);
+}
+
+static void WriteWorkspaceHelp(string? subcommand)
+{
+    switch (subcommand)
+    {
+        case "list":
+            Console.WriteLine("""
+            RagNet Indexer - workspace list
+
+            Usage:
+              ragnet-indexer workspace list
+
+            Lists indexed workspaces from the Qdrant registry as a table.
+            """);
+            return;
+
+        case "status":
+            Console.WriteLine("""
+            RagNet Indexer - workspace status
+
+            Usage:
+              ragnet-indexer workspace status <indexed-name-or-root>
+
+            Shows index state for one workspace.
+
+            Example:
+              ragnet-indexer workspace status Api
+            """);
+            return;
+
+        case "delete":
+            Console.WriteLine("""
+            RagNet Indexer - workspace delete
+
+            Usage:
+              ragnet-indexer workspace delete <indexed-name-or-root>
+
+            Deletes the workspace vector collection, registry record, index-state points,
+            and any incomplete staging collection recorded in state.
+            """);
+            return;
+
+        case "collection":
+            Console.WriteLine("""
+            RagNet Indexer - workspace collection
+
+            Usage:
+              ragnet-indexer workspace collection <indexed-name-or-root-or-path>
+              ragnet-indexer workspace collection --workspace <path-or-name>
+              ragnet-indexer workspace collection --group <name>
+              ragnet-indexer workspace collection --path <file-or-directory>
+
+            Resolves workspaces, paths, or groups to Qdrant collection names.
+            """);
+            return;
+
+        case "export":
+            Console.WriteLine("""
+            RagNet Indexer - workspace export
+
+            Usage:
+              ragnet-indexer workspace export <indexed-name-or-root> --output|-o <directory>
+
+            Exports one indexed workspace manifest and Qdrant point data.
+            """);
+            return;
+
+        case "import":
+            Console.WriteLine("""
+            RagNet Indexer - workspace import
+
+            Usage:
+              ragnet-indexer workspace import --input|-i <directory> [--workspace-root <new-root>|--root <new-root>|--path-map <exported-root=new-root> ...]
+
+            Imports a workspace export into the current Qdrant instance.
+            """);
+            return;
+
+        case "adopt":
+            Console.WriteLine("""
+            RagNet Indexer - workspace adopt
+
+            Usage:
+              ragnet-indexer workspace adopt <workspace-root> [--target <indexed-target> ...] [--embedding-model <model>]
+
+            Records index state for an existing Qdrant collection.
+            """);
+            return;
+
+        case "migrate":
+            Console.WriteLine("""
+            RagNet Indexer - workspace migrate
+
+            Usage:
+              ragnet-indexer workspace migrate
+
+            Rewrites current registry records with export-friendly metadata when it can be inferred.
+            """);
+            return;
+    }
+
+    Console.WriteLine("""
+    RagNet Indexer - workspace
+
+    Usage:
+      ragnet-indexer workspace list
+      ragnet-indexer workspace status <indexed-name-or-root>
+      ragnet-indexer workspace delete <indexed-name-or-root>
+      ragnet-indexer workspace collection [<indexed-name-or-root>|--workspace <path-or-name>|--group <name>|--path <file-or-directory>]
+      ragnet-indexer workspace export <indexed-name-or-root> --output|-o <directory>
+      ragnet-indexer workspace import --input|-i <directory> [--workspace-root <new-root>|--root <new-root>|--path-map <exported-root=new-root> ...]
+      ragnet-indexer workspace adopt <workspace-root> [--target <indexed-target> ...] [--embedding-model <model>]
+      ragnet-indexer workspace migrate
+
+    Run `ragnet-indexer workspace <command> --help` for command-specific help.
+    """);
+}
+
+static void WriteGroupHelp(string? subcommand)
+{
+    switch (subcommand)
+    {
+        case "list":
+            Console.WriteLine("""
+            RagNet Indexer - group list
+
+            Usage:
+              ragnet-indexer group list
+
+            Lists configured and shared workspace groups as a table.
+            """);
+            return;
+
+        case "create":
+            Console.WriteLine("""
+            RagNet Indexer - group create
+
+            Usage:
+              ragnet-indexer group create <name> --workspace|-w <indexed-name-or-root> [--workspace|-w <indexed-name-or-root> ...] [--current|-c]
+
+            Creates or replaces a shared group from already indexed workspaces.
+            """);
+            return;
+
+        case "add":
+            Console.WriteLine("""
+            RagNet Indexer - group add
+
+            Usage:
+              ragnet-indexer group add <name> --workspace|-w <indexed-name-or-root> [--workspace|-w <indexed-name-or-root> ...] [--current|-c]
+
+            Appends already indexed workspaces to an existing shared group.
+            """);
+            return;
+
+        case "delete":
+            Console.WriteLine("""
+            RagNet Indexer - group delete
+
+            Usage:
+              ragnet-indexer group delete <name>
+
+            Deletes a shared group. Configured read-only groups must be removed from configuration.
+            """);
+            return;
+
+        case "export":
+            Console.WriteLine("""
+            RagNet Indexer - group export
+
+            Usage:
+              ragnet-indexer group export <name> --output|-o <directory>
+
+            Exports all indexed workspaces in a group.
+            """);
+            return;
+
+        case "import":
+            Console.WriteLine("""
+            RagNet Indexer - group import
+
+            Usage:
+              ragnet-indexer group import --input|-i <directory> --path-map <exported-root=new-root> [...]
+
+            Imports a product/group export into the current Qdrant instance.
+            """);
+            return;
+    }
+
+    Console.WriteLine("""
+    RagNet Indexer - group
+
+    Usage:
+      ragnet-indexer group list
+      ragnet-indexer group create <name> --workspace|-w <indexed-name-or-root> [...]
+      ragnet-indexer group add <name> --workspace|-w <indexed-name-or-root> [...]
+      ragnet-indexer group delete <name>
+      ragnet-indexer group export <name> --output|-o <directory>
+      ragnet-indexer group import --input|-i <directory> --path-map <exported-root=new-root> [...]
+
+    Run `ragnet-indexer group <command> --help` for command-specific help.
+    """);
+}
+
+static void WriteQdrantHelp()
+{
+    Console.WriteLine("""
+    RagNet Indexer - qdrant
+
+    Usage:
+      ragnet-indexer qdrant status
+
+    Shows configured Qdrant URL, collection counts, registry counts, index-state count,
+    approximate vector count, and matching RagNet collection names.
+    """);
+}
+
+static void WriteProfileHelp()
+{
+    Console.WriteLine("""
+    RagNet Indexer - profile
+
+    Usage:
+      ragnet-indexer profile list
+
+    Lists available index/search profiles.
+    """);
+}
+
+static void WriteEvalHelp()
+{
+    Console.WriteLine("""
+    RagNet Indexer - eval
+
+    Usage:
+      ragnet-indexer eval --queries|-q <eval.json> [--workspace-root <path>|--group <name>] [--limit <n>] [--hybrid] [--search-profile <profile>]
+
+    Runs a search evaluation JSON suite through the same search pipeline used by MCP.
+    Exits 0 when every query passes and 2 when any query misses.
+    """);
+}
+
 static void WriteHelp()
 {
     Console.WriteLine("""
@@ -1275,40 +1564,41 @@ static void WriteHelp()
     Commands:
       index       --workspace|-w <target> [--workspace|-w <target> ...] [--current|-c] [--group|-g <name>] [--add|-a] [--force] [--dry-run] [--profile <profile>] [--exclude|-e <dir-or-relative-path> ...]
       index       --group|-g <name> [--force] [--dry-run] [--profile <profile>] [--exclude|-e <dir-or-relative-path> ...]
-      status      --workspace <path>
-      status      qdrant
-      workspace   collection [--workspace <path-or-name>|--group <name>|--path <file-or-directory>]
-      workspace   export <indexed-name-or-root> --output <directory>
-      workspace   import --input <directory> [--workspace-root <new-root>|--path-map <exported-root=new-root> ...]
-      workspace   recover <workspace-root> [--target <indexed-target> ...] [--embedding-model <model>]
+      workspace   list
+      workspace   status <indexed-name-or-root>
+      workspace   delete <indexed-name-or-root>
+      workspace   collection [<indexed-name-or-root>|--workspace <path-or-name>|--group <name>|--path <file-or-directory>]
+      workspace   export <indexed-name-or-root> --output|-o <directory>
+      workspace   import --input|-i <directory> [--workspace-root <new-root>|--root <new-root>|--path-map <exported-root=new-root> ...]
+      workspace   adopt <workspace-root> [--target <indexed-target> ...] [--embedding-model <model>]
       workspace   migrate
-      group       export <name> --output <directory>
-      group       import --input <directory> --path-map <exported-root=new-root> [...]
-      eval        --queries <eval.json> [--workspace-root <path>|--group <name>] [--limit <n>] [--hybrid] [--search-profile <profile>]
-      profiles
-      create      group <name> --workspace|-w <indexed-name-or-root> [--workspace|-w <indexed-name-or-root> ...] [--current|-c] [--add|-a]
-      list        groups
-      list        profiles
-      list        workspaces
-      delete      group <name>
-      delete      workspace <workspace-root>
+      group       list
+      group       create <name> --workspace|-w <indexed-name-or-root> [--workspace|-w <indexed-name-or-root> ...] [--current|-c]
+      group       add <name> --workspace|-w <indexed-name-or-root> [--workspace|-w <indexed-name-or-root> ...] [--current|-c]
+      group       delete <name>
+      group       export <name> --output|-o <directory>
+      group       import --input|-i <directory> --path-map <exported-root=new-root> [...]
+      qdrant      status
+      profile     list
+      eval        --queries|-q <eval.json> [--workspace-root <path>|--group <name>] [--limit <n>] [--hybrid] [--search-profile <profile>]
 
     Options:
       --profile       Index profile: all, code, docs, metadata, frontend, or tests. Default is all.
-      --group, -g     With --workspace, saves/replaces a shared group. Without --workspace, indexes an existing group.
+      --group, -g     With index --workspace, saves/replaces a shared group. With index only, indexes an existing group.
       --workspace, -w Index target: workspace root, directory, solution file, or supported file. Repeat to union targets.
       --current, -c   Add the current directory as an index target.
       --add, -a       With --workspace and --group, append targets to the existing group instead of replacing it.
       --dry-run       Preview files and chunks that would be indexed without writing vectors, state, registry, or local groups.
       --exclude, -e   Exclude a directory name or relative path. Repeat, pass several values, or use comma/semicolon-separated values.
       --no-progress   Suppress progress output. Index/status/delete results are written to stdout.
-      --queries       Search evaluation JSON file. Eval exits 0 when all queries pass and 2 when any query misses.
-      --output        Export directory for a RagNet Qdrant workspace/group export.
-      --input         Import directory containing ragnet-export-manifest.json.
+      --queries, -q   Search evaluation JSON file. Eval exits 0 when all queries pass and 2 when any query misses.
+      --output, -o    Export directory for a RagNet Qdrant workspace/group export.
+      --input, -i     Import directory containing ragnet-export-manifest.json.
       --workspace-root New local root when importing a single exported workspace.
+      --root          Shorter alias for --workspace-root during workspace import/adopt.
       --path-map      Import remap from exported root to local root. Repeat for multi-workspace exports.
-      --target        Indexed target to record when recovering an existing Qdrant collection. Repeat for solution/product scopes.
-      --embedding-model Embedding model to record when recovering index state. Defaults to configured RagNet:Ollama:EmbeddingModel.
+      --target        Indexed target to record when adopting an existing Qdrant collection. Repeat for solution/product scopes.
+      --embedding-model Embedding model to record when adopting index state. Defaults to configured RagNet:Ollama:EmbeddingModel.
 
     Examples:
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln
@@ -1318,24 +1608,24 @@ static void WriteHelp()
       ragnet-indexer index --workspace D:\Work\Product\Api\Api.sln --workspace D:\Work\Product\Admin\Admin.sln --group my-product
       ragnet-indexer index -w D:\Work\Product\Api\Api.sln -w D:\Work\Product\docs\api
       ragnet-indexer index -w D:\Work\Product\Worker -g my-product -a
-      ragnet-indexer create group my-product -w Api -w Admin
-      ragnet-indexer create group my-product --current
       ragnet-indexer index --group my-product --force
-      ragnet-indexer status --workspace D:\Work\Product\Api
-      ragnet-indexer status qdrant
-      ragnet-indexer workspace collection --path D:\Work\Product\Api\Api.sln
-      ragnet-indexer workspace export Api --output D:\Backups\ragnet-api
-      ragnet-indexer group export my-product --output D:\Backups\ragnet-product
-      ragnet-indexer workspace import --input D:\Backups\ragnet-api --workspace-root E:\Repos\Product\Api
-      ragnet-indexer workspace recover E:\Repos\Product\Api --target E:\Repos\Product\Api\Api.sln
-      ragnet-indexer group import D:\Backups\ragnet-product --path-map D:\Work\Product=E:\Repos\Product
+      ragnet-indexer workspace status Api
+      ragnet-indexer qdrant status
+      ragnet-indexer workspace collection D:\Work\Product\Api\Api.sln
+      ragnet-indexer workspace export Api -o D:\Backups\ragnet-api
+      ragnet-indexer workspace import -i D:\Backups\ragnet-api --root E:\Repos\Product\Api
+      ragnet-indexer workspace adopt E:\Repos\Product\Api --target E:\Repos\Product\Api\Api.sln
       ragnet-indexer workspace migrate
-      ragnet-indexer eval --queries eval.json --workspace-root D:\Work\Product\Api --limit 10 --hybrid
-      ragnet-indexer profiles
-      ragnet-indexer list groups
-      ragnet-indexer list workspaces
-      ragnet-indexer delete group my-product
-      ragnet-indexer delete workspace D:\Work\Product\Api
+      ragnet-indexer group create my-product -w Api -w Admin
+      ragnet-indexer group add my-product -w Worker
+      ragnet-indexer group export my-product -o D:\Backups\ragnet-product
+      ragnet-indexer group import -i D:\Backups\ragnet-product --path-map D:\Work\Product=E:\Repos\Product
+      ragnet-indexer group list
+      ragnet-indexer group delete my-product
+      ragnet-indexer workspace list
+      ragnet-indexer workspace delete Api
+      ragnet-indexer profile list
+      ragnet-indexer eval -q eval.json --workspace-root D:\Work\Product\Api --limit 10 --hybrid
     """);
 }
 
