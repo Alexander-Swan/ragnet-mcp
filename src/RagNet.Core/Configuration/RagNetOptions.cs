@@ -89,6 +89,10 @@ public sealed class IndexingOptions
     public int MaxEmbeddingConcurrency { get; init; } = 4;
 
     public int MaxEmbeddingBatchSize { get; init; } = 16;
+
+    public int CheckpointFileInterval { get; init; } = 256;
+
+    public int CheckpointIntervalSeconds { get; init; } = 30;
 }
 
 public sealed class ClassificationOptions

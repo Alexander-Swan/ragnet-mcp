@@ -37,6 +37,8 @@ public sealed class WorkspaceIndexer(
     private const int MaxEmbeddingConcurrencyLimit = 16;
     private const int MaxEmbeddingBatchSizeLimit = 128;
     private const int MaxFilesPerBatchLimit = 512;
+    private const int MaxCheckpointFileIntervalLimit = 10_000;
+    private const int MaxCheckpointIntervalSecondsLimit = 3_600;
     private static readonly Regex SolutionProjectRegex = new(
         "^Project\\(\"\\{[^}]+\\}\"\\)\\s*=\\s*\"[^\"]+\",\\s*\"([^\"]+)\"",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -310,6 +312,8 @@ public sealed class WorkspaceIndexer(
         var upsertedFiles = 0;
         var embeddedChunks = 0;
         var totalChangedFiles = analysis.ChangedFiles.Count;
+        var filesAtLastCheckpoint = 0;
+        var lastCheckpointAt = DateTimeOffset.UtcNow;
 
         Report(progress, workspaceRoot, IndexingProgressStage.AnalyzingFiles, 0, totalChangedFiles, "Analyzing changed files.");
         Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, 0, totalChangedFiles, "Creating embeddings.");
@@ -353,6 +357,22 @@ public sealed class WorkspaceIndexer(
                 upsertedFiles += fileBatch.Length;
                 Report(progress, workspaceRoot, IndexingProgressStage.CreatingEmbeddings, embeddedFiles, totalChangedFiles, $"No embeddings through {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
                 Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, $"No vectors through {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
+                await SaveIncompleteIndexStateIfDueAsync(
+                    analysis,
+                    targetCollectionName,
+                    embeddingModel,
+                    indexProfile,
+                    chunkCountsByFile,
+                    upsertedFiles,
+                    totalChangedFiles,
+                    checkpoint =>
+                    {
+                        filesAtLastCheckpoint = checkpoint.CompletedFiles;
+                        lastCheckpointAt = checkpoint.SavedAt;
+                    },
+                    filesAtLastCheckpoint,
+                    lastCheckpointAt,
+                    cancellationToken);
                 continue;
             }
 
@@ -377,6 +397,22 @@ public sealed class WorkspaceIndexer(
             {
                 upsertedFiles += fileBatch.Length;
                 Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, $"No vectors through {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
+                await SaveIncompleteIndexStateIfDueAsync(
+                    analysis,
+                    targetCollectionName,
+                    embeddingModel,
+                    indexProfile,
+                    chunkCountsByFile,
+                    upsertedFiles,
+                    totalChangedFiles,
+                    checkpoint =>
+                    {
+                        filesAtLastCheckpoint = checkpoint.CompletedFiles;
+                        lastCheckpointAt = checkpoint.SavedAt;
+                    },
+                    filesAtLastCheckpoint,
+                    lastCheckpointAt,
+                    cancellationToken);
                 continue;
             }
 
@@ -388,18 +424,79 @@ public sealed class WorkspaceIndexer(
                 embeddedBatch.Embeddings,
                 cancellationToken);
             embeddedChunks += embeddedBatch.Chunks.Count;
-            await SaveIncompleteIndexStateAsync(
+            upsertedFiles += fileBatch.Length;
+            await SaveIncompleteIndexStateIfDueAsync(
                 analysis,
                 targetCollectionName,
                 embeddingModel,
                 indexProfile,
                 chunkCountsByFile,
+                upsertedFiles,
+                totalChangedFiles,
+                checkpoint =>
+                {
+                    filesAtLastCheckpoint = checkpoint.CompletedFiles;
+                    lastCheckpointAt = checkpoint.SavedAt;
+                },
+                filesAtLastCheckpoint,
+                lastCheckpointAt,
                 cancellationToken);
-            upsertedFiles += fileBatch.Length;
             Report(progress, workspaceRoot, IndexingProgressStage.UpsertingVectors, upsertedFiles, totalChangedFiles, $"Writing vectors through {FormatProgressPath(workspaceRoot, fileBatch[^1])}");
         }
 
         return new StreamedIndexResult(chunkCountsByFile, embeddedChunks);
+    }
+
+    private async Task SaveIncompleteIndexStateIfDueAsync(
+        WorkspaceIndexAnalysis analysis,
+        string targetCollectionName,
+        string embeddingModel,
+        string indexProfile,
+        IReadOnlyDictionary<string, int> completedChunkCountsByFile,
+        int completedFiles,
+        int totalFiles,
+        Action<CheckpointSave> recordCheckpoint,
+        int filesAtLastCheckpoint,
+        DateTimeOffset lastCheckpointAt,
+        CancellationToken cancellationToken)
+    {
+        if (!ShouldSaveIncompleteIndexState(completedFiles, totalFiles, filesAtLastCheckpoint, lastCheckpointAt))
+        {
+            return;
+        }
+
+        await SaveIncompleteIndexStateAsync(
+            analysis,
+            targetCollectionName,
+            embeddingModel,
+            indexProfile,
+            completedChunkCountsByFile,
+            cancellationToken);
+        recordCheckpoint(new CheckpointSave(completedFiles, DateTimeOffset.UtcNow));
+    }
+
+    private bool ShouldSaveIncompleteIndexState(
+        int completedFiles,
+        int totalFiles,
+        int filesAtLastCheckpoint,
+        DateTimeOffset lastCheckpointAt)
+    {
+        if (completedFiles <= 0)
+        {
+            return false;
+        }
+
+        if (completedFiles >= totalFiles)
+        {
+            return true;
+        }
+
+        if (completedFiles - filesAtLastCheckpoint >= GetCheckpointFileInterval())
+        {
+            return true;
+        }
+
+        return DateTimeOffset.UtcNow - lastCheckpointAt >= TimeSpan.FromSeconds(GetCheckpointIntervalSeconds());
     }
 
     private async Task SaveIncompleteIndexStateAsync(
@@ -544,6 +641,12 @@ public sealed class WorkspaceIndexer(
 
     private int GetMaxFilesPerBatch()
         => Math.Clamp(_options.Indexing.MaxFilesPerBatch, 1, MaxFilesPerBatchLimit);
+
+    private int GetCheckpointFileInterval()
+        => Math.Clamp(_options.Indexing.CheckpointFileInterval, 1, MaxCheckpointFileIntervalLimit);
+
+    private int GetCheckpointIntervalSeconds()
+        => Math.Clamp(_options.Indexing.CheckpointIntervalSeconds, 1, MaxCheckpointIntervalSecondsLimit);
 
     private IReadOnlyList<EmbeddingWorkItem> CreateEmbeddingWorkItems(IReadOnlyList<CodeChunk> chunks)
     {
@@ -2080,4 +2183,6 @@ public sealed class WorkspaceIndexer(
         int ChunksEmbedded);
 
     private sealed record EmbeddingWorkItem(string CacheKey, string Content, List<int> ChunkIndexes);
+
+    private sealed record CheckpointSave(int CompletedFiles, DateTimeOffset SavedAt);
 }

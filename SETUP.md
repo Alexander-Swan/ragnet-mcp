@@ -355,7 +355,9 @@ The indexer prints progress to stderr and writes index/status/delete results to 
 
 Embedding requests run as concurrent Ollama batches while indexing. Tune file batch size with `RagNet:Indexing:MaxFilesPerBatch`, concurrent embedding batch count with `RagNet:Indexing:MaxEmbeddingConcurrency`, embedding batch size with `RagNet:Indexing:MaxEmbeddingBatchSize`, and Qdrant write size with `RagNet:Qdrant:UpsertBatchSize` in `appsettings.json` or an environment-specific override. Defaults are `16`, `4`, `16`, and `256`.
 
-Indexing is resumable at file-batch boundaries. After a batch is embedded and written to Qdrant, RagNet saves an incomplete checkpoint with the files already completed and the collection being written. If the process is interrupted, rerun the same command and RagNet resumes from that checkpoint. During a forced/full reindex, the replacement collection is still promoted only after completion, so search keeps using the previous completed index while the resumed run finishes.
+Resumable indexing writes checkpoint state to Qdrant after `RagNet:Indexing:CheckpointFileInterval` completed files or `RagNet:Indexing:CheckpointIntervalSeconds`, whichever comes first, plus a final checkpoint. Defaults are `256` files and `30` seconds. Lower values reduce rework after interruption but can make large indexing runs slower.
+
+Indexing is resumable at checkpoint boundaries. RagNet saves an incomplete checkpoint with the files already completed and the collection being written. If the process is interrupted, rerun the same command and RagNet resumes from the latest checkpoint. During a forced/full reindex, the replacement collection is still promoted only after completion, so search keeps using the previous completed index while the resumed run finishes.
 
 Check index state:
 

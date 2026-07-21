@@ -381,7 +381,8 @@ public sealed class WorkspaceIndexerTests
             {
                 Indexing = new IndexingOptions
                 {
-                    MaxFilesPerBatch = 1
+                    MaxFilesPerBatch = 1,
+                    CheckpointFileInterval = 1
                 }
             });
 
@@ -408,7 +409,8 @@ public sealed class WorkspaceIndexerTests
             {
                 Indexing = new IndexingOptions
                 {
-                    MaxFilesPerBatch = 1
+                    MaxFilesPerBatch = 1,
+                    CheckpointFileInterval = 1
                 }
             });
 
@@ -420,6 +422,38 @@ public sealed class WorkspaceIndexerTests
         var firstCheckpoint = stateStore.SavedStates.First(state => !state.IsComplete);
         Assert.Equal(vectorStore.LastUpsertCollectionName, firstCheckpoint.IndexingCollectionName);
         Assert.Single(firstCheckpoint.Files);
+    }
+
+    [Fact]
+    public async Task IndexAsync_ThrottlesIncompleteStateCheckpoints()
+    {
+        using var workspace = new TemporaryWorkspace();
+        workspace.WriteFile("src/First.cs", "first");
+        workspace.WriteFile("src/Second.cs", "second");
+        workspace.WriteFile("src/Third.cs", "third");
+        var stateStore = new FakeStateStore(State(workspace.RootPath));
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            stateStore,
+            new FakeVectorStore(),
+            new FakeAnalyzer(),
+            options: new RagNetOptions
+            {
+                Indexing = new IndexingOptions
+                {
+                    MaxFilesPerBatch = 1,
+                    CheckpointFileInterval = 2,
+                    CheckpointIntervalSeconds = 3_600
+                }
+            });
+
+        await indexer.IndexAsync(workspace.RootPath);
+
+        var incompleteCheckpoints = stateStore.SavedStates.Where(state => !state.IsComplete).ToArray();
+        Assert.Equal(2, incompleteCheckpoints.Length);
+        Assert.Equal(2, incompleteCheckpoints[0].Files.Count);
+        Assert.Equal(3, incompleteCheckpoints[1].Files.Count);
+        Assert.True(stateStore.SavedStates[^1].IsComplete);
     }
 
     [Fact]
