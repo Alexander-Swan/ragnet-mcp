@@ -48,6 +48,23 @@ public sealed class QdrantVectorStoreTests
     }
 
     [Fact]
+    public async Task UpsertAsync_ReusesValidatedCollectionWithinStore()
+    {
+        using var handler = new FakeQdrantHandler();
+        handler.Enqueue(HttpStatusCode.OK, """{"result":{"config":{"params":{"vectors":{"size":2}}}}}""");
+        handler.Enqueue(HttpStatusCode.OK, """{"result":{"operation_id":1,"status":"completed"}}""");
+        handler.Enqueue(HttpStatusCode.OK, """{"result":{"operation_id":2,"status":"completed"}}""");
+        var store = CreateStore(handler);
+        var workspaceRoot = Path.Combine(Path.GetTempPath(), $"ragnet-qdrant-vector-cache-{Guid.NewGuid():N}");
+
+        await store.UpsertAsync(workspaceRoot, [CreateChunk(workspaceRoot, "src/First.cs", "first")], [[1f, 0f]]);
+        await store.UpsertAsync(workspaceRoot, [CreateChunk(workspaceRoot, "src/Second.cs", "second")], [[0f, 1f]]);
+
+        Assert.Single(handler.Requests, request => request.Method == "GET" && request.Path.StartsWith("/collections/", StringComparison.Ordinal));
+        Assert.Equal(2, handler.Requests.Count(request => request.Method == "PUT" && request.Path.EndsWith("/points", StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public async Task SearchAsync_RejectsUnsupportedStoredSchemaVersion()
     {
         using var handler = new FakeQdrantHandler();
@@ -81,6 +98,23 @@ public sealed class QdrantVectorStoreTests
 
         Assert.Contains("schema version '999'", exception.Message);
         Assert.Contains(IndexSchemaVersions.Current.ToString(), exception.Message);
+    }
+
+    [Fact]
+    public async Task SearchAsync_ReusesCollectionExistenceWithinStore()
+    {
+        using var handler = new FakeQdrantHandler();
+        handler.Enqueue(HttpStatusCode.OK, """{"result":{"status":"green"}}""");
+        handler.Enqueue(HttpStatusCode.OK, EmptySearchResult);
+        handler.Enqueue(HttpStatusCode.OK, EmptySearchResult);
+        var store = CreateStore(handler);
+        var workspaceRoot = Path.Combine(Path.GetTempPath(), $"ragnet-qdrant-vector-tests-{Guid.NewGuid():N}");
+
+        await store.SearchAsync(workspaceRoot, [1f, 0f], "first", 10, hybrid: false);
+        await store.SearchAsync(workspaceRoot, [1f, 0f], "second", 10, hybrid: false);
+
+        Assert.Single(handler.Requests, request => request.Method == "GET" && request.Path.StartsWith("/collections/", StringComparison.Ordinal));
+        Assert.Equal(2, handler.Requests.Count(request => request.Method == "POST" && request.Path.EndsWith("/points/query", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -159,6 +193,25 @@ public sealed class QdrantVectorStoreTests
         Assert.Equal("/collections/ragnet-stage-test", request.Path);
     }
 
+    [Fact]
+    public async Task DeleteCollectionAsync_InvalidatesCollectionExistenceCache()
+    {
+        using var handler = new FakeQdrantHandler();
+        handler.Enqueue(HttpStatusCode.OK, """{"result":{"status":"green"}}""");
+        handler.Enqueue(HttpStatusCode.OK, EmptySearchResult);
+        handler.Enqueue(HttpStatusCode.OK, "{}");
+        handler.Enqueue(HttpStatusCode.NotFound, "{}");
+        var store = CreateStore(handler);
+        var workspaceRoot = Path.Combine(Path.GetTempPath(), $"ragnet-qdrant-vector-tests-{Guid.NewGuid():N}");
+
+        await store.SearchAsync(workspaceRoot, "cached-collection", [1f, 0f], "first", 10, hybrid: false);
+        await store.DeleteCollectionAsync("cached-collection");
+        var results = await store.SearchAsync(workspaceRoot, "cached-collection", [1f, 0f], "second", 10, hybrid: false);
+
+        Assert.Empty(results);
+        Assert.Equal(2, handler.Requests.Count(request => request.Method == "GET" && request.Path == "/collections/cached-collection"));
+    }
+
     private static QdrantVectorStore CreateStore(FakeQdrantHandler handler, int upsertBatchSize = 256)
     {
         var options = Options.Create(new RagNetOptions
@@ -190,6 +243,8 @@ public sealed class QdrantVectorStoreTests
             StartLine: 1,
             EndLine: 1,
             Content: content);
+
+    private const string EmptySearchResult = """{"result":[]}""";
 
     private static int CountPoints(CapturedRequest request)
     {

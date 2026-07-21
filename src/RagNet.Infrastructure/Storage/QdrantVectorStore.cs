@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
@@ -25,6 +26,8 @@ public sealed class QdrantVectorStore(
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly RagNetOptions _options = options.Value;
     private readonly HttpClient _httpClient = httpClient;
+    private readonly ConcurrentDictionary<string, byte> _existingCollections = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, int> _validatedCollectionVectorSizes = new(StringComparer.OrdinalIgnoreCase);
 
     public async Task UpsertAsync(string workspaceRoot, IReadOnlyList<CodeChunk> chunks, IReadOnlyList<float[]> embeddings, CancellationToken cancellationToken = default)
         => await UpsertAsync(
@@ -154,10 +157,12 @@ public sealed class QdrantVectorStore(
         var response = await _httpClient.DeleteAsync($"collections/{Uri.EscapeDataString(collectionName)}?timeout=30", cancellationToken);
         if (response.StatusCode == HttpStatusCode.NotFound)
         {
+            InvalidateCollectionCache(collectionName);
             return;
         }
 
         await EnsureSuccessAsync(response, $"delete Qdrant collection '{collectionName}'", cancellationToken);
+        InvalidateCollectionCache(collectionName);
         logger.LogInformation("Deleted Qdrant collection {CollectionName}.", collectionName);
     }
 
@@ -314,10 +319,23 @@ public sealed class QdrantVectorStore(
 
     private async Task EnsureCollectionAsync(string collectionName, int vectorSize, CancellationToken cancellationToken)
     {
+        if (_validatedCollectionVectorSizes.TryGetValue(collectionName, out var ensuredVectorSize))
+        {
+            if (ensuredVectorSize == vectorSize)
+            {
+                return;
+            }
+
+            throw new InvalidOperationException(
+                $"Qdrant collection '{collectionName}' was already validated with vector size {ensuredVectorSize}, but the current embedding size is {vectorSize}.");
+        }
+
         var response = await _httpClient.GetAsync($"collections/{Uri.EscapeDataString(collectionName)}", cancellationToken);
         if (response.StatusCode == HttpStatusCode.NotFound)
         {
             await CreateCollectionAsync(collectionName, vectorSize, cancellationToken);
+            MarkCollectionExists(collectionName);
+            _validatedCollectionVectorSizes[collectionName] = vectorSize;
             return;
         }
 
@@ -331,6 +349,9 @@ public sealed class QdrantVectorStore(
                 "If you already passed --force, make sure the target is the full workspace root, for example: ragnet-indexer index -c --force or ragnet-indexer index -w <workspace-root> --force. " +
                 "For solution, subfolder, file, group member, or profile-scoped indexing, --force only rebuilds that scope and cannot replace an incompatible active collection.");
         }
+
+        MarkCollectionExists(collectionName);
+        _validatedCollectionVectorSizes[collectionName] = vectorSize;
     }
 
     private async Task CreateCollectionAsync(string collectionName, int vectorSize, CancellationToken cancellationToken)
@@ -354,14 +375,30 @@ public sealed class QdrantVectorStore(
 
     private async Task<bool> CollectionExistsAsync(string collectionName, CancellationToken cancellationToken)
     {
+        if (_existingCollections.ContainsKey(collectionName))
+        {
+            return true;
+        }
+
         var response = await _httpClient.GetAsync($"collections/{Uri.EscapeDataString(collectionName)}", cancellationToken);
         if (response.StatusCode == HttpStatusCode.NotFound)
         {
+            InvalidateCollectionCache(collectionName);
             return false;
         }
 
         await EnsureSuccessAsync(response, $"read Qdrant collection '{collectionName}'", cancellationToken);
+        MarkCollectionExists(collectionName);
         return true;
+    }
+
+    private void MarkCollectionExists(string collectionName)
+        => _existingCollections[collectionName] = 0;
+
+    private void InvalidateCollectionCache(string collectionName)
+    {
+        _existingCollections.TryRemove(collectionName, out _);
+        _validatedCollectionVectorSizes.TryRemove(collectionName, out _);
     }
 
     private static async Task<int?> ReadVectorSizeAsync(HttpResponseMessage response, CancellationToken cancellationToken)
