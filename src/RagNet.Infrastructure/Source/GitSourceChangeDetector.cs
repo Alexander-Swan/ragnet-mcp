@@ -11,8 +11,9 @@ public sealed class GitSourceChangeDetector : ISourceChangeDetector
 
     public async Task<SourceChangeSet> DetectChangesAsync(
         string workspaceRoot,
-        IReadOnlyList<string> candidateFiles,
+        IReadOnlyList<string>? candidateFiles,
         IReadOnlyList<string> previouslyIndexedFiles,
+        string? previousCommitSha = null,
         CancellationToken cancellationToken = default)
     {
         var repositoryRoot = await TryGetRepositoryRootAsync(workspaceRoot, cancellationToken);
@@ -21,15 +22,37 @@ public sealed class GitSourceChangeDetector : ISourceChangeDetector
             return SourceChangeSet.Unavailable("git", "No Git repository was found.");
         }
 
+        var currentCommitSha = await TryGetCurrentCommitShaAsync(repositoryRoot, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(previousCommitSha) &&
+            !string.IsNullOrWhiteSpace(currentCommitSha) &&
+            !string.Equals(previousCommitSha, currentCommitSha, StringComparison.OrdinalIgnoreCase))
+        {
+            var diff = await RunGitAsync(repositoryRoot, ["diff", "--name-status", "-z", previousCommitSha, currentCommitSha], cancellationToken);
+            if (diff.ExitCode != 0)
+            {
+                return SourceChangeSet.Unavailable("git", diff.Error.Trim());
+            }
+
+            return await DetectFromDiffAndStatusAsync(
+                repositoryRoot,
+                diff.Output,
+                candidateFiles,
+                previouslyIndexedFiles,
+                cancellationToken);
+        }
+
         var status = await RunGitAsync(repositoryRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], cancellationToken);
         if (status.ExitCode != 0)
         {
             return SourceChangeSet.Unavailable("git", status.Error.Trim());
         }
 
-        var candidateSet = candidateFiles
-            .Select(NormalizePath)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var hasCandidateFilter = candidateFiles is { Count: > 0 };
+        var candidateSet = hasCandidateFilter
+            ? candidateFiles!
+                .Select(NormalizePath)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : [];
         var previousSet = previouslyIndexedFiles
             .Select(NormalizePath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -38,7 +61,7 @@ public sealed class GitSourceChangeDetector : ISourceChangeDetector
 
         foreach (var item in ParseStatus(status.Output, repositoryRoot))
         {
-            if (!candidateSet.Contains(item.Path) && !previousSet.Contains(item.Path))
+            if (hasCandidateFilter && !candidateSet.Contains(item.Path) && !previousSet.Contains(item.Path))
             {
                 continue;
             }
@@ -57,7 +80,55 @@ public sealed class GitSourceChangeDetector : ISourceChangeDetector
             "git",
             IsAvailable: true,
             changed.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
-            deleted.Order(StringComparer.OrdinalIgnoreCase).ToArray());
+            deleted.Order(StringComparer.OrdinalIgnoreCase).ToArray())
+        {
+            IsComplete = true
+        };
+    }
+
+    private static async Task<SourceChangeSet> DetectFromDiffAndStatusAsync(
+        string repositoryRoot,
+        string diffOutput,
+        IReadOnlyList<string>? candidateFiles,
+        IReadOnlyList<string> previouslyIndexedFiles,
+        CancellationToken cancellationToken)
+    {
+        var status = await RunGitAsync(repositoryRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], cancellationToken);
+        if (status.ExitCode != 0)
+        {
+            return SourceChangeSet.Unavailable("git", status.Error.Trim());
+        }
+
+        var hasCandidateFilter = candidateFiles is { Count: > 0 };
+        var candidateSet = hasCandidateFilter
+            ? candidateFiles!
+                .Select(NormalizePath)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : [];
+        var previousSet = previouslyIndexedFiles
+            .Select(NormalizePath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var changed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var deleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var item in ParseNameStatus(diffOutput, repositoryRoot))
+        {
+            AddChange(item, hasCandidateFilter, candidateSet, previousSet, changed, deleted);
+        }
+
+        foreach (var item in ParseStatus(status.Output, repositoryRoot))
+        {
+            AddChange(item, hasCandidateFilter, candidateSet, previousSet, changed, deleted);
+        }
+
+        return new SourceChangeSet(
+            "git",
+            IsAvailable: true,
+            changed.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+            deleted.Order(StringComparer.OrdinalIgnoreCase).ToArray())
+        {
+            IsComplete = true
+        };
     }
 
     private static async Task<string?> TryGetRepositoryRootAsync(string workspaceRoot, CancellationToken cancellationToken)
@@ -70,6 +141,45 @@ public sealed class GitSourceChangeDetector : ISourceChangeDetector
 
         var root = result.Output.Trim();
         return string.IsNullOrWhiteSpace(root) ? null : NormalizePath(root);
+    }
+
+    private static async Task<string?> TryGetCurrentCommitShaAsync(string repositoryRoot, CancellationToken cancellationToken)
+    {
+        var result = await RunGitAsync(repositoryRoot, ["rev-parse", "HEAD"], cancellationToken);
+        if (result.ExitCode != 0)
+        {
+            return null;
+        }
+
+        var commitSha = result.Output.Trim();
+        return string.IsNullOrWhiteSpace(commitSha) ? null : commitSha;
+    }
+
+    private static void AddChange(
+        GitStatusItem item,
+        bool hasCandidateFilter,
+        HashSet<string> candidateSet,
+        HashSet<string> previousSet,
+        HashSet<string> changed,
+        HashSet<string> deleted)
+    {
+        if (hasCandidateFilter && !candidateSet.Contains(item.Path) && !previousSet.Contains(item.Path))
+        {
+            return;
+        }
+
+        if (item.Deleted)
+        {
+            deleted.Add(item.Path);
+            changed.Remove(item.Path);
+            return;
+        }
+
+        if (File.Exists(item.Path))
+        {
+            changed.Add(item.Path);
+            deleted.Remove(item.Path);
+        }
     }
 
     private static IEnumerable<GitStatusItem> ParseStatus(string output, string repositoryRoot)
@@ -92,6 +202,39 @@ public sealed class GitSourceChangeDetector : ISourceChangeDetector
                 yield return new GitStatusItem(NormalizePath(Path.Combine(repositoryRoot, parts[++index])), Deleted: true);
             }
 
+            yield return new GitStatusItem(NormalizePath(Path.Combine(repositoryRoot, path)), deleted);
+        }
+    }
+
+    private static IEnumerable<GitStatusItem> ParseNameStatus(string output, string repositoryRoot)
+    {
+        var parts = output.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        for (var index = 0; index < parts.Length; index++)
+        {
+            var status = parts[index];
+            if (string.IsNullOrWhiteSpace(status) || index + 1 >= parts.Length)
+            {
+                continue;
+            }
+
+            var deleted = status.StartsWith('D');
+            var renamed = status.StartsWith('R') || status.StartsWith('C');
+            if (renamed)
+            {
+                var oldPath = parts[++index];
+                if (index + 1 >= parts.Length)
+                {
+                    yield return new GitStatusItem(NormalizePath(Path.Combine(repositoryRoot, oldPath)), Deleted: true);
+                    continue;
+                }
+
+                var newPath = parts[++index];
+                yield return new GitStatusItem(NormalizePath(Path.Combine(repositoryRoot, oldPath)), Deleted: true);
+                yield return new GitStatusItem(NormalizePath(Path.Combine(repositoryRoot, newPath)), Deleted: false);
+                continue;
+            }
+
+            var path = parts[++index];
             yield return new GitStatusItem(NormalizePath(Path.Combine(repositoryRoot, path)), deleted);
         }
     }

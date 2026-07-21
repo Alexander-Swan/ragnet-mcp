@@ -177,6 +177,45 @@ public sealed class WorkspaceIndexerTests
         Assert.Contains(Path.GetFullPath(unchanged), stateStore.SavedState!.Files.Keys);
         Assert.DoesNotContain(Path.GetFullPath(removed), stateStore.SavedState.Files.Keys);
         Assert.True(detector.WasCalled);
+        Assert.Null(detector.CandidateFiles);
+    }
+
+    [Fact]
+    public async Task IndexAsync_PassesPreviousCommitToSourceChangeDetectorForSameGitWorkspace()
+    {
+        using var workspace = new TemporaryWorkspace();
+        workspace.WriteFile("src/Changed.cs", "changed v2");
+        var detector = new FakeSourceChangeDetector(changeSet: new SourceChangeSet(
+            "git",
+            IsAvailable: true,
+            ChangedFiles: [],
+            DeletedFiles: [])
+        {
+            IsComplete = true
+        });
+        var registry = new FakeIndexedWorkspaceRegistry();
+        registry.Records.Add(IndexedWorkspace(workspace.RootPath) with
+        {
+            RepositoryRoot = Path.GetFullPath(workspace.RootPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            CommitSha = "previous-commit"
+        });
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(State(workspace.RootPath, FileState(Path.Combine(workspace.RootPath, "src", "Changed.cs")))),
+            new FakeVectorStore(),
+            new FakeAnalyzer(),
+            registry,
+            sourceChangeDetector: detector,
+            sourceIdentityResolver: new FakeSourceIdentityResolver(new SourceIdentity(
+                workspace.RootPath,
+                workspace.RootPath,
+                ".",
+                IsGitRepository: true,
+                CommitSha: "current-commit")));
+
+        await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal("previous-commit", detector.PreviousCommitSha);
     }
 
     [Fact]
@@ -209,6 +248,57 @@ public sealed class WorkspaceIndexerTests
         Assert.Equal([Path.GetFullPath(changed)], analyzer.AnalyzedFiles);
         Assert.Equal([Path.GetFullPath(changed)], vectorStore.DeletedFiles);
         Assert.True(detector.WasCalled);
+    }
+
+    [Fact]
+    public async Task IndexAsync_DefaultContentHashFingerprintDetectsSameSizeSameTimestampChanges()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var changed = workspace.WriteFile("src/Changed.cs", "old1");
+        var previousState = FileState(changed);
+        var previousWriteTimeUtc = File.GetLastWriteTimeUtc(changed);
+        await File.WriteAllTextAsync(changed, "new1");
+        File.SetLastWriteTimeUtc(changed, previousWriteTimeUtc);
+        var stateStore = new FakeStateStore(State(workspace.RootPath, previousState));
+        var vectorStore = new FakeVectorStore();
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(workspace.RootPath, stateStore, vectorStore, analyzer);
+
+        await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Equal([Path.GetFullPath(changed)], analyzer.AnalyzedFiles);
+        Assert.Equal([Path.GetFullPath(changed)], vectorStore.DeletedFiles);
+    }
+
+    [Fact]
+    public async Task IndexAsync_MetadataFingerprintSkipsSameSizeSameTimestampChanges()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var changed = workspace.WriteFile("src/Changed.cs", "old1");
+        var previousState = MetadataFileState(changed);
+        var previousWriteTimeUtc = File.GetLastWriteTimeUtc(changed);
+        await File.WriteAllTextAsync(changed, "new1");
+        File.SetLastWriteTimeUtc(changed, previousWriteTimeUtc);
+        var stateStore = new FakeStateStore(State(workspace.RootPath, previousState));
+        var vectorStore = new FakeVectorStore();
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            stateStore,
+            vectorStore,
+            analyzer,
+            options: new RagNetOptions
+            {
+                Indexing = new IndexingOptions
+                {
+                    FileFingerprintMode = FileFingerprintModes.Metadata
+                }
+            });
+
+        await indexer.IndexAsync(workspace.RootPath);
+
+        Assert.Empty(analyzer.AnalyzedFiles);
+        Assert.Empty(vectorStore.DeletedFiles);
     }
 
     [Fact]
@@ -1049,7 +1139,8 @@ public sealed class WorkspaceIndexerTests
         FakeIndexedWorkspaceRegistry? registry = null,
         FakeEmbeddingProvider? embeddingProvider = null,
         RagNetOptions? options = null,
-        FakeSourceChangeDetector? sourceChangeDetector = null)
+        FakeSourceChangeDetector? sourceChangeDetector = null,
+        FakeSourceIdentityResolver? sourceIdentityResolver = null)
     {
         var provider = embeddingProvider ?? new FakeEmbeddingProvider();
         return new(
@@ -1062,7 +1153,7 @@ public sealed class WorkspaceIndexerTests
             provider,
             provider,
             vectorStore,
-            new FakeSourceIdentityResolver(),
+            sourceIdentityResolver ?? new FakeSourceIdentityResolver(),
             sourceChangeDetector ?? new FakeSourceChangeDetector(),
             Options.Create(options ?? new RagNetOptions()));
     }
@@ -1099,7 +1190,19 @@ public sealed class WorkspaceIndexerTests
         var info = new FileInfo(fullPath);
         return new IndexedFileState(
             fullPath,
-            fingerprint ?? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(fullPath))),
+            fingerprint ?? $"sha256:{Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(fullPath)))}",
+            info.Length,
+            info.LastWriteTimeUtc,
+            chunkCount);
+    }
+
+    private static IndexedFileState MetadataFileState(string filePath, int chunkCount = 1)
+    {
+        var fullPath = Path.GetFullPath(filePath);
+        var info = new FileInfo(fullPath);
+        return new IndexedFileState(
+            fullPath,
+            $"metadata:{info.Length}:{info.LastWriteTimeUtc.Ticks}",
             info.Length,
             info.LastWriteTimeUtc,
             chunkCount);
@@ -1501,23 +1604,28 @@ public sealed class WorkspaceIndexerTests
         }
     }
 
-    private sealed class FakeSourceIdentityResolver : ISourceIdentityResolver
+    private sealed class FakeSourceIdentityResolver(SourceIdentity? sourceIdentity = null) : ISourceIdentityResolver
     {
         public Task<SourceIdentity> ResolveAsync(string workspaceRoot, string filePath, CancellationToken cancellationToken = default)
-            => Task.FromResult(SourceIdentity.Local(workspaceRoot, filePath));
+            => Task.FromResult(sourceIdentity ?? SourceIdentity.Local(workspaceRoot, filePath));
     }
 
     private sealed class FakeSourceChangeDetector(SourceChangeSet? changeSet = null) : ISourceChangeDetector
     {
         public bool WasCalled { get; private set; }
+        public IReadOnlyList<string>? CandidateFiles { get; private set; }
+        public string? PreviousCommitSha { get; private set; }
 
         public Task<SourceChangeSet> DetectChangesAsync(
             string workspaceRoot,
-            IReadOnlyList<string> candidateFiles,
+            IReadOnlyList<string>? candidateFiles,
             IReadOnlyList<string> previouslyIndexedFiles,
+            string? previousCommitSha = null,
             CancellationToken cancellationToken = default)
         {
             WasCalled = true;
+            CandidateFiles = candidateFiles;
+            PreviousCommitSha = previousCommitSha;
             return Task.FromResult(changeSet ?? SourceChangeSet.Unavailable("test"));
         }
     }

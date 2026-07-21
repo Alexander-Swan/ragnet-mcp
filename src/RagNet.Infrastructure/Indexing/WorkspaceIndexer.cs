@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -293,7 +294,8 @@ public sealed class WorkspaceIndexer(
             streamedIndex.ChunksEmbedded,
             analysis.FullReindex,
             analysis.Warnings,
-            totalChunksIndexed);
+            totalChunksIndexed,
+            analysis.UnchangedFileCount);
     }
 
     private async Task<StreamedIndexResult> AnalyzeEmbedAndUpsertChangedFilesAsync(
@@ -796,9 +798,6 @@ public sealed class WorkspaceIndexer(
     {
         var warnings = new List<string>();
         var workspaceRoot = targetPlan.WorkspaceRoot;
-        var profileFiles = targetPlan.EnumerateFiles()
-            .Where(file => FileMatchesProfile(file, indexProfile))
-            .ToArray();
         Report(progress, workspaceRoot, IndexingProgressStage.ComparingState, 0, null, "Comparing with previous index state.");
         var previousState = await indexStateStore.LoadAsync(workspaceRoot, cancellationToken);
         var stateCompatible = !previousState.StateExists || IsStateCompatible(previousState, embeddingModel);
@@ -807,6 +806,8 @@ public sealed class WorkspaceIndexer(
         var targetScoped = !targetPlan.IsFullWorkspace;
         var mergeScopedState = profileScoped || targetScoped;
         var fullReindex = force || !stateCompatible || resumeIncompleteState;
+        var workspaceSourceIdentity = await sourceIdentityResolver.ResolveAsync(workspaceRoot, workspaceRoot, cancellationToken);
+        var previousWorkspaceRecord = await GetPreviousWorkspaceRecordAsync(workspaceRoot, cancellationToken);
         if (!stateCompatible && !force && !allowIncompatibleScopedState)
         {
             throw new InvalidOperationException(
@@ -846,10 +847,10 @@ public sealed class WorkspaceIndexer(
         var scanPlan = await CreateFileScanPlanAsync(
             targetPlan,
             previousState,
-            profileFiles,
             force,
             indexProfile,
             fullReindex,
+            GetPreviousCommitSha(previousWorkspaceRecord, workspaceSourceIdentity),
             cancellationToken);
         var currentFiles = new Dictionary<string, IndexedFileState>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in scanPlan.PreservedFiles)
@@ -897,8 +898,6 @@ public sealed class WorkspaceIndexer(
         var changedSet = changedFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var unchangedFileCount = currentFiles.Keys.Count(file => !changedSet.Contains(file));
         var chunks = new List<CodeChunk>();
-        var workspaceSourceIdentity = await sourceIdentityResolver.ResolveAsync(workspaceRoot, workspaceRoot, cancellationToken);
-
         if (collectChunks)
         {
             var analyzed = 0;
@@ -952,33 +951,40 @@ public sealed class WorkspaceIndexer(
     private async Task<FileScanPlan> CreateFileScanPlanAsync(
         WorkspaceIndexTargetPlan targetPlan,
         WorkspaceIndexState previousState,
-        IReadOnlyList<string> profileFiles,
         bool force,
         string indexProfile,
         bool fullReindex,
+        string? previousCommitSha,
         CancellationToken cancellationToken)
     {
-        if (force || fullReindex || !previousState.StateExists)
-        {
-            return FileScanPlan.Fallback(profileFiles);
-        }
-
         var previousScopedFiles = previousState.Files.Values
             .Where(file => FileMatchesProfile(file.FilePath, indexProfile) && targetPlan.CanDeleteMissingFile(file.FilePath))
             .ToArray();
+
+        if (force || fullReindex || !previousState.StateExists)
+        {
+            var filesToScan = EnumerateTargetFiles(targetPlan)
+                .Where(file => FileMatchesProfile(file, indexProfile))
+                .ToArray();
+            return FileScanPlan.Fallback(filesToScan);
+        }
+
         var changeSet = await sourceChangeDetector.DetectChangesAsync(
             targetPlan.WorkspaceRoot,
-            profileFiles,
+            candidateFiles: null,
             previousScopedFiles.Select(file => file.FilePath).ToArray(),
+            previousCommitSha,
             cancellationToken);
         if (!changeSet.IsAvailable || !changeSet.IsComplete)
         {
-            return FileScanPlan.Fallback(profileFiles);
+            var filesToScan = EnumerateTargetFiles(targetPlan)
+                .Where(file => FileMatchesProfile(file, indexProfile))
+                .ToArray();
+            return FileScanPlan.Fallback(filesToScan);
         }
 
-        var candidateSet = profileFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var changedFiles = changeSet.ChangedFiles
-            .Where(file => candidateSet.Contains(file) && File.Exists(file))
+            .Where(file => File.Exists(file) && FileMatchesTargetPlan(targetPlan, file, indexProfile))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         var deletedFiles = changeSet.DeletedFiles
@@ -1067,16 +1073,18 @@ public sealed class WorkspaceIndexer(
             {
                 return WorkspaceIndexTargetPlan.FullWorkspace(
                     workspaceRoot,
-                    EnumerateFiles(workspaceRoot, workspaceRoot, excludeDirectories).ToArray());
+                    excludeDirectories);
             }
 
             EnsurePathUnderWorkspace(fullPath, workspaceRoot);
             return WorkspaceIndexTargetPlan.Scoped(
                 workspaceRoot,
                 indexedTargets: [fullPath],
-                EnumerateFiles(workspaceRoot, fullPath, excludeDirectories).ToArray(),
+                files: [],
+                scanRoots: [fullPath],
                 deleteRoots: [fullPath],
-                deleteFiles: []);
+                deleteFiles: [],
+                excludeDirectories);
         }
 
         if (!File.Exists(fullPath))
@@ -1100,8 +1108,10 @@ public sealed class WorkspaceIndexer(
             workspaceRoot,
             indexedTargets: [fullPath],
             files,
+            scanRoots: [],
             deleteRoots: [],
-            deleteFiles: [fullPath]);
+            deleteFiles: [fullPath],
+            excludeDirectories);
     }
 
     private WorkspaceIndexTargetPlan CreateSolutionTargetPlan(
@@ -1125,11 +1135,6 @@ public sealed class WorkspaceIndexer(
             var projectDirectory = NormalizePath(Path.GetDirectoryName(projectPath)!);
             deleteRoots.Add(projectDirectory);
 
-            foreach (var file in EnumerateFiles(workspaceRoot, projectDirectory, excludeDirectories))
-            {
-                files.Add(file);
-            }
-
             foreach (var sharedMetadata in EnumerateSharedDotNetMetadata(workspaceRoot, projectDirectory))
             {
                 files.Add(sharedMetadata);
@@ -1147,8 +1152,10 @@ public sealed class WorkspaceIndexer(
             workspaceRoot,
             indexedTargets: [solutionPath],
             files.Where(file => _analyzers.Any(analyzer => analyzer.CanAnalyze(file))).ToArray(),
+            scanRoots: deleteRoots.ToArray(),
             deleteRoots.ToArray(),
-            deleteFiles.ToArray());
+            deleteFiles.ToArray(),
+            excludeDirectories);
     }
 
     public async Task<IndexStatusResult> GetStatusAsync(
@@ -1335,6 +1342,57 @@ public sealed class WorkspaceIndexer(
                 }
             }
         }
+    }
+
+    private IReadOnlyList<string> EnumerateTargetFiles(WorkspaceIndexTargetPlan targetPlan)
+    {
+        var files = new HashSet<string>(targetPlan.Files, StringComparer.OrdinalIgnoreCase);
+        foreach (var scanRoot in targetPlan.ScanRoots)
+        {
+            foreach (var file in EnumerateFiles(targetPlan.WorkspaceRoot, scanRoot, targetPlan.ExcludeDirectories))
+            {
+                files.Add(file);
+            }
+        }
+
+        return files
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private bool FileMatchesTargetPlan(WorkspaceIndexTargetPlan targetPlan, string filePath, string indexProfile)
+    {
+        var normalized = NormalizePath(filePath);
+        if (!FileMatchesProfile(normalized, indexProfile) || !_analyzers.Any(analyzer => analyzer.CanAnalyze(normalized)))
+        {
+            return false;
+        }
+
+        var excluded = BuildExcludeSet(targetPlan.ExcludeDirectories);
+        var fileExcludePatterns = BuildFileExcludePatterns();
+        var directory = Path.GetDirectoryName(normalized);
+        while (!string.IsNullOrWhiteSpace(directory) && IsPathUnderRoot(directory, targetPlan.WorkspaceRoot))
+        {
+            if (IsExcludedDirectory(targetPlan.WorkspaceRoot, directory, excluded))
+            {
+                return false;
+            }
+
+            directory = Path.GetDirectoryName(directory);
+        }
+
+        if (IsExcludedFile(targetPlan.WorkspaceRoot, normalized, fileExcludePatterns))
+        {
+            return false;
+        }
+
+        if (targetPlan.IsFullWorkspace)
+        {
+            return IsPathUnderRoot(normalized, targetPlan.WorkspaceRoot);
+        }
+
+        return targetPlan.Files.Any(file => string.Equals(file, normalized, StringComparison.OrdinalIgnoreCase)) ||
+            targetPlan.ScanRoots.Any(root => IsPathUnderRoot(normalized, root));
     }
 
     private IReadOnlyList<string> ResolveSolutionProjects(string solutionPath, CancellationToken cancellationToken)
@@ -1569,21 +1627,33 @@ public sealed class WorkspaceIndexer(
     }
 
     private async Task<int> GetPreviousRegistryChunkCountAsync(string workspaceRoot, CancellationToken cancellationToken)
-    {
-        var previous = (await indexedWorkspaceRegistry.GetIndexedWorkspacesAsync(cancellationToken))
-            .LastOrDefault(workspace => string.Equals(workspace.WorkspaceRoot, workspaceRoot, StringComparison.OrdinalIgnoreCase));
-
-        return previous?.ChunksIndexed ?? 0;
-    }
+        => (await GetPreviousWorkspaceRecordAsync(workspaceRoot, cancellationToken))?.ChunksIndexed ?? 0;
 
     private async Task<string> ResolveActiveCollectionNameAsync(string workspaceRoot, CancellationToken cancellationToken)
     {
-        var previous = (await indexedWorkspaceRegistry.GetIndexedWorkspacesAsync(cancellationToken))
-            .LastOrDefault(workspace => string.Equals(workspace.WorkspaceRoot, workspaceRoot, StringComparison.OrdinalIgnoreCase));
-
+        var previous = await GetPreviousWorkspaceRecordAsync(workspaceRoot, cancellationToken);
         return string.IsNullOrWhiteSpace(previous?.CollectionName)
             ? QdrantCollectionNaming.GetCollectionName(_options.Qdrant.CollectionPrefix, workspaceRoot)
             : previous.CollectionName;
+    }
+
+    private async Task<IndexedWorkspaceRecord?> GetPreviousWorkspaceRecordAsync(string workspaceRoot, CancellationToken cancellationToken)
+    {
+        return (await indexedWorkspaceRegistry.GetIndexedWorkspacesAsync(cancellationToken))
+            .LastOrDefault(workspace => string.Equals(workspace.WorkspaceRoot, workspaceRoot, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string? GetPreviousCommitSha(IndexedWorkspaceRecord? previousWorkspaceRecord, SourceIdentity currentSourceIdentity)
+    {
+        if (previousWorkspaceRecord is null ||
+            !currentSourceIdentity.IsGitRepository ||
+            string.IsNullOrWhiteSpace(previousWorkspaceRecord.CommitSha) ||
+            !string.Equals(previousWorkspaceRecord.RepositoryRoot, currentSourceIdentity.RepositoryRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return previousWorkspaceRecord.CommitSha;
     }
 
     private static IReadOnlyDictionary<string, int> CountChunksByFile(IReadOnlyList<CodeChunk> chunks)
@@ -1638,16 +1708,53 @@ public sealed class WorkspaceIndexer(
     private static int SumChunkCounts(IEnumerable<IndexedFileState> files)
         => files.Sum(file => file.ChunkCount);
 
-    private static IndexedFileState ComputeIndexedFileState(string filePath)
+    private IndexedFileState ComputeIndexedFileState(string filePath)
     {
         var info = new FileInfo(filePath);
-        using var stream = File.OpenRead(filePath);
-        var hash = SHA256.HashData(stream);
+        var fingerprint = GetFileFingerprint(info);
         return new IndexedFileState(
             NormalizePath(filePath),
-            Convert.ToHexString(hash),
+            fingerprint,
             info.Length,
             info.LastWriteTimeUtc);
+    }
+
+    private string GetFileFingerprint(FileInfo info)
+    {
+        var mode = NormalizeFileFingerprintMode(_options.Indexing.FileFingerprintMode);
+        return mode switch
+        {
+            FileFingerprintMode.Metadata => GetMetadataFingerprint(info),
+            _ => GetContentHashFingerprint(info)
+        };
+    }
+
+    private static string GetContentHashFingerprint(FileInfo info)
+    {
+        using var stream = info.OpenRead();
+        return $"sha256:{Convert.ToHexString(SHA256.HashData(stream))}";
+    }
+
+    private static string GetMetadataFingerprint(FileInfo info)
+        => string.Create(
+            CultureInfo.InvariantCulture,
+            $"metadata:{info.Length}:{info.LastWriteTimeUtc.Ticks}");
+
+    private static FileFingerprintMode NormalizeFileFingerprintMode(string? mode)
+    {
+        if (string.IsNullOrWhiteSpace(mode) ||
+            string.Equals(mode, FileFingerprintModes.ContentHash, StringComparison.OrdinalIgnoreCase))
+        {
+            return FileFingerprintMode.ContentHash;
+        }
+
+        if (string.Equals(mode, FileFingerprintModes.Metadata, StringComparison.OrdinalIgnoreCase))
+        {
+            return FileFingerprintMode.Metadata;
+        }
+
+        throw new InvalidOperationException(
+            $"Unsupported RagNet:Indexing:FileFingerprintMode '{mode}'. Use {FileFingerprintModes.ContentHash} or {FileFingerprintModes.Metadata}.");
     }
 
     private static bool IsStateCompatible(WorkspaceIndexState state, string embeddingModel)
@@ -2085,25 +2192,39 @@ public sealed class WorkspaceIndexer(
         bool IsFullWorkspace,
         IReadOnlyList<string> IndexedTargets,
         IReadOnlyList<string> Files,
+        IReadOnlyList<string> ScanRoots,
         IReadOnlyList<string> DeleteRoots,
-        IReadOnlyList<string> DeleteFiles)
+        IReadOnlyList<string> DeleteFiles,
+        IReadOnlyList<string> ExcludeDirectories)
     {
-        public static WorkspaceIndexTargetPlan FullWorkspace(string workspaceRoot, IReadOnlyList<string> files)
-            => new(workspaceRoot, true, [NormalizePath(workspaceRoot)], NormalizeDistinct(files), [workspaceRoot], []);
+        public static WorkspaceIndexTargetPlan FullWorkspace(string workspaceRoot, IReadOnlyList<string>? excludeDirectories)
+            => new(
+                workspaceRoot,
+                true,
+                [NormalizePath(workspaceRoot)],
+                [],
+                [NormalizePath(workspaceRoot)],
+                [workspaceRoot],
+                [],
+                NormalizeExcludes(excludeDirectories));
 
         public static WorkspaceIndexTargetPlan Scoped(
             string workspaceRoot,
             IReadOnlyList<string> indexedTargets,
             IReadOnlyList<string> files,
+            IReadOnlyList<string> scanRoots,
             IReadOnlyList<string> deleteRoots,
-            IReadOnlyList<string> deleteFiles)
+            IReadOnlyList<string> deleteFiles,
+            IReadOnlyList<string>? excludeDirectories)
             => new(
                 workspaceRoot,
                 false,
                 NormalizeDistinct(indexedTargets),
                 NormalizeDistinct(files),
+                NormalizeDistinct(scanRoots),
                 NormalizeDistinct(deleteRoots),
-                NormalizeDistinct(deleteFiles));
+                NormalizeDistinct(deleteFiles),
+                NormalizeExcludes(excludeDirectories));
 
         public WorkspaceIndexTargetPlan Merge(WorkspaceIndexTargetPlan other)
         {
@@ -2126,12 +2247,11 @@ public sealed class WorkspaceIndexer(
                 WorkspaceRoot,
                 IndexedTargets.Concat(other.IndexedTargets).ToArray(),
                 Files.Concat(other.Files).ToArray(),
+                ScanRoots.Concat(other.ScanRoots).ToArray(),
                 DeleteRoots.Concat(other.DeleteRoots).ToArray(),
-                DeleteFiles.Concat(other.DeleteFiles).ToArray());
+                DeleteFiles.Concat(other.DeleteFiles).ToArray(),
+                ExcludeDirectories.Concat(other.ExcludeDirectories).ToArray());
         }
-
-        public IEnumerable<string> EnumerateFiles()
-            => Files;
 
         public bool CanDeleteMissingFile(string filePath)
         {
@@ -2145,6 +2265,12 @@ public sealed class WorkspaceIndexer(
             => paths
                 .Where(path => !string.IsNullOrWhiteSpace(path))
                 .Select(NormalizePath)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+        private static IReadOnlyList<string> NormalizeExcludes(IReadOnlyList<string>? excludes)
+            => (excludes ?? [])
+                .Where(path => !string.IsNullOrWhiteSpace(path))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
     }
@@ -2185,4 +2311,10 @@ public sealed class WorkspaceIndexer(
     private sealed record EmbeddingWorkItem(string CacheKey, string Content, List<int> ChunkIndexes);
 
     private sealed record CheckpointSave(int CompletedFiles, DateTimeOffset SavedAt);
+
+    private enum FileFingerprintMode
+    {
+        ContentHash,
+        Metadata
+    }
 }

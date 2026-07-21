@@ -4,7 +4,8 @@ public interface ISourceChangeDetector
 {
     Task<SourceChangeSet> DetectChangesAsync(
         string workspaceRoot,
-        IReadOnlyList<string> candidateFiles,
+        IReadOnlyList<string>? candidateFiles,
         IReadOnlyList<string> previouslyIndexedFiles,
+        string? previousCommitSha = null,
         CancellationToken cancellationToken = default);
 }

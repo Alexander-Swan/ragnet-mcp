@@ -6,4 +6,5 @@ public sealed record IndexWorkspaceResult(
     int ChunksIndexed,
     bool FullReindex,
     IReadOnlyList<string> Warnings,
-    int TotalChunksIndexed = 0);
+    int TotalChunksIndexed = 0,
+    int UnchangedFiles = 0);

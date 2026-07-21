@@ -82,6 +82,8 @@ public sealed class WorkspaceGroupOptions
 
 public sealed class IndexingOptions
 {
+    public string FileFingerprintMode { get; init; } = FileFingerprintModes.ContentHash;
+
     public int ChunkMaxChars { get; init; } = 8_000;
 
     public int MaxFilesPerBatch { get; init; } = 16;
@@ -93,6 +95,13 @@ public sealed class IndexingOptions
     public int CheckpointFileInterval { get; init; } = 256;
 
     public int CheckpointIntervalSeconds { get; init; } = 30;
+}
+
+public static class FileFingerprintModes
+{
+    public const string ContentHash = "ContentHash";
+
+    public const string Metadata = "Metadata";
 }
 
 public sealed class ClassificationOptions

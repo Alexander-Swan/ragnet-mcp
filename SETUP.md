@@ -356,7 +356,9 @@ The indexer prints progress to stderr and writes index/status/delete results to 
 .\bin\ragnet-indexer.exe index --workspace "D:\Work\Product\Api" --no-progress
 ```
 
-Embedding requests run as concurrent Ollama batches while indexing. Tune file batch size with `RagNet:Indexing:MaxFilesPerBatch`, concurrent embedding batch count with `RagNet:Indexing:MaxEmbeddingConcurrency`, embedding batch size with `RagNet:Indexing:MaxEmbeddingBatchSize`, and Qdrant write size with `RagNet:Qdrant:UpsertBatchSize` in `appsettings.json` or an environment-specific override. Defaults are `16`, `4`, `16`, and `256`.
+Embedding requests run as concurrent Ollama batches while indexing. Tune file batch size with `RagNet:Indexing:MaxFilesPerBatch`, concurrent embedding batch count with `RagNet:Indexing:MaxEmbeddingConcurrency`, embedding batch size with `RagNet:Indexing:MaxEmbeddingBatchSize`, file scan fingerprinting with `RagNet:Indexing:FileFingerprintMode`, and Qdrant write size with `RagNet:Qdrant:UpsertBatchSize` in `appsettings.json` or an environment-specific override. Defaults are `16`, `4`, `16`, `ContentHash`, and `256`.
+
+`FileFingerprintMode` supports `ContentHash` and `Metadata`. `ContentHash` is the safe default and reads each scanned file to compute a SHA256 fingerprint. `Metadata` uses file size plus last-write time, which is much faster for large non-git/TFS-like workspaces but can miss same-size edits when timestamps are preserved.
 
 Resumable indexing writes checkpoint state to Qdrant after `RagNet:Indexing:CheckpointFileInterval` completed files or `RagNet:Indexing:CheckpointIntervalSeconds`, whichever comes first, plus a final checkpoint. Defaults are `256` files and `30` seconds. Lower values reduce rework after interruption but can make large indexing runs slower.
 
