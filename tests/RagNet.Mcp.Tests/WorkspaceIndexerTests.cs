@@ -1037,6 +1037,38 @@ public sealed class WorkspaceIndexerTests
     }
 
     [Fact]
+    public async Task DryRunIndexTargetsAsync_SolutionScopeDoesNotDuplicatePreservedState()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var solution = workspace.WriteFile(
+            "Product.sln",
+            """
+            Microsoft Visual Studio Solution File, Format Version 12.00
+            Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Api", "Api\Api.csproj", "{11111111-1111-1111-1111-111111111111}"
+            EndProject
+            """);
+        workspace.WriteFile("Api/Api.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        var apiFile = workspace.WriteFile("Api/Program.cs", "api");
+        var unrelatedFile = workspace.WriteFile("docs/guide.md", "docs");
+        var previousState = State(
+            workspace.RootPath,
+            FileState(apiFile),
+            FileState(unrelatedFile));
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            new FakeStateStore(previousState),
+            new FakeVectorStore(),
+            new FakeAnalyzer());
+
+        var result = await indexer.DryRunIndexTargetsAsync([solution]);
+
+        var dryRun = Assert.Single(result);
+        Assert.Equal(
+            dryRun.FileChunkEstimates.Count,
+            dryRun.FileChunkEstimates.Select(file => file.FilePath).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+    }
+
+    [Fact]
     public async Task SearchAsync_ForwardsFiltersOverfetchesAndPacksResults()
     {
         using var workspace = new TemporaryWorkspace();

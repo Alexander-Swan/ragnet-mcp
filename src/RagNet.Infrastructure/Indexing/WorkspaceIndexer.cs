@@ -246,11 +246,7 @@ public sealed class WorkspaceIndexer(
             streamedIndex.EmbeddedChunkCountsByFile,
             analysis.PreviousState.Files);
         var filesToSave = analysis.MergeScopedState
-            ? analysis.PreviousState.Files
-                .Where(file => !FileMatchesProfile(file.Key, indexProfile) || !analysis.TargetPlan.CanDeleteMissingFile(file.Key))
-                .Select(file => file.Value)
-                .Concat(currentFilesWithChunkCounts.Values)
-                .ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
+            ? MergeScopedFiles(analysis, currentFilesWithChunkCounts, indexProfile)
             : currentFilesWithChunkCounts;
         var totalChunksIndexed = SumChunkCounts(filesToSave);
         if (totalChunksIndexed == 0 && streamedIndex.ChunksEmbedded == 0)
@@ -761,11 +757,7 @@ public sealed class WorkspaceIndexer(
             estimatedChunkCountsByFile,
             analysis.PreviousState.Files);
         var estimatedFilesAfterIndex = analysis.MergeScopedState
-            ? analysis.PreviousState.Files
-                .Where(file => !FileMatchesProfile(file.Key, indexProfile) || !analysis.TargetPlan.CanDeleteMissingFile(file.Key))
-                .Select(file => file.Value)
-                .Concat(currentFilesWithEstimates.Values)
-                .ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
+            ? MergeScopedFiles(analysis, currentFilesWithEstimates, indexProfile)
             : currentFilesWithEstimates;
         var chunkEstimateRows = CreateFileChunkEstimates(analysis, estimatedChunkCountsByFile);
 
@@ -1676,6 +1668,23 @@ public sealed class WorkspaceIndexer(
                         : file.ChunkCount
             },
             StringComparer.OrdinalIgnoreCase);
+
+    private IReadOnlyDictionary<string, IndexedFileState> MergeScopedFiles(
+        WorkspaceIndexAnalysis analysis,
+        IReadOnlyDictionary<string, IndexedFileState> currentFiles,
+        string indexProfile)
+    {
+        var merged = analysis.PreviousState.Files
+            .Where(file => !FileMatchesProfile(file.Key, indexProfile) || !analysis.TargetPlan.CanDeleteMissingFile(file.Key))
+            .ToDictionary(file => file.Key, file => file.Value, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var file in currentFiles.Values)
+        {
+            merged[file.FilePath] = file;
+        }
+
+        return merged;
+    }
 
     private static IReadOnlyList<IndexFileChunkEstimate> CreateFileChunkEstimates(
         WorkspaceIndexAnalysis analysis,
