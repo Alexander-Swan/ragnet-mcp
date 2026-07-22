@@ -14,6 +14,8 @@ public interface IVectorStore
 
     Task DeleteByFilesAsync(string workspaceRoot, string collectionName, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default);
 
+    Task DeleteByDirectoriesAsync(string workspaceRoot, string collectionName, IReadOnlyList<string> directoryPaths, CancellationToken cancellationToken = default);
+
     Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default);
 
     Task DeleteCollectionAsync(string collectionName, CancellationToken cancellationToken = default);

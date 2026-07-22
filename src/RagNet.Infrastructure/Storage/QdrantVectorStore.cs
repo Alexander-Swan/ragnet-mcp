@@ -22,6 +22,7 @@ public sealed class QdrantVectorStore(
     private const string Distance = "Cosine";
     private const int HybridCandidateMultiplier = 5;
     private const int DeleteFileBatchSize = 64;
+    private const int ScrollFilePathBatchSize = 512;
     private const int MaxUpsertBatchSize = 2_048;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly RagNetOptions _options = options.Value;
@@ -144,6 +145,31 @@ public sealed class QdrantVectorStore(
             "Deleted indexed chunks for {FileCount} files from Qdrant collection {CollectionName}.",
             normalizedFilePaths.Length,
             collectionName);
+    }
+
+    public async Task DeleteByDirectoriesAsync(
+        string workspaceRoot,
+        string collectionName,
+        IReadOnlyList<string> directoryPaths,
+        CancellationToken cancellationToken = default)
+    {
+        if (directoryPaths.Count == 0 ||
+            !await CollectionExistsAsync(collectionName, cancellationToken))
+        {
+            return;
+        }
+
+        var normalizedDirectories = directoryPaths
+            .Select(NormalizePath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var indexedFiles = await GetIndexedFilesAsync(workspaceRoot, collectionName, cancellationToken);
+        var filesToDelete = indexedFiles
+            .Where(file => normalizedDirectories.Any(directory => IsPathUnderRoot(file, directory)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        await DeleteByFilesAsync(workspaceRoot, collectionName, filesToDelete, cancellationToken);
     }
 
     public async Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default)
@@ -315,6 +341,68 @@ public sealed class QdrantVectorStore(
             .OrderBy(chunk => chunk.StartLine)
             .ThenBy(chunk => chunk.EndLine)
             .ToArray();
+    }
+
+    private async Task<IReadOnlyList<string>> GetIndexedFilesAsync(
+        string workspaceRoot,
+        string collectionName,
+        CancellationToken cancellationToken)
+    {
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        object? offset = null;
+        do
+        {
+            var request = new Dictionary<string, object?>
+            {
+                ["limit"] = ScrollFilePathBatchSize,
+                ["with_payload"] = new[] { "file_path" },
+                ["with_vector"] = false,
+                ["filter"] = new
+                {
+                    must = new object[]
+                    {
+                        MatchKeyword("workspace_id", QdrantCollectionNaming.GetWorkspaceId(workspaceRoot))
+                    }
+                }
+            };
+            if (offset is not null)
+            {
+                request["offset"] = offset;
+            }
+
+            var response = await _httpClient.PostAsJsonAsync(
+                $"collections/{Uri.EscapeDataString(collectionName)}/points/scroll",
+                request,
+                JsonOptions,
+                cancellationToken);
+
+            await EnsureSuccessAsync(response, $"scroll Qdrant collection '{collectionName}' for indexed files", cancellationToken);
+
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            if (!document.RootElement.TryGetProperty("result", out var result))
+            {
+                return files.ToArray();
+            }
+
+            if (result.TryGetProperty("points", out var points) && points.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var point in points.EnumerateArray())
+                {
+                    if (point.TryGetProperty("payload", out var payload) &&
+                        payload.TryGetProperty("file_path", out var filePath) &&
+                        filePath.ValueKind == JsonValueKind.String)
+                    {
+                        files.Add(NormalizePath(filePath.GetString()!));
+                    }
+                }
+            }
+
+            offset = ReadNextPageOffset(result);
+        }
+        while (offset is not null);
+
+        return files.ToArray();
     }
 
     private async Task EnsureCollectionAsync(string collectionName, int vectorSize, CancellationToken cancellationToken)
@@ -632,6 +720,22 @@ public sealed class QdrantVectorStore(
         return fullPath.Length == root?.Length
             ? fullPath
             : fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    private static bool IsPathUnderRoot(string path, string root)
+    {
+        var normalizedPath = NormalizePath(path);
+        var normalizedRoot = NormalizePath(root);
+        return string.Equals(normalizedPath, normalizedRoot, StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.StartsWith(
+                normalizedRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.StartsWith(
+                normalizedRoot.TrimEnd('\\', '/') + '\\',
+                StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.StartsWith(
+                normalizedRoot.TrimEnd('\\', '/') + '/',
+                StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsWindowsFullyQualifiedPath(string path)

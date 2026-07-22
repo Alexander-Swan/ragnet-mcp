@@ -54,6 +54,29 @@ public sealed class InMemoryVectorStore : IVectorStore
         return Task.CompletedTask;
     }
 
+    public Task DeleteByDirectoriesAsync(
+        string workspaceRoot,
+        string collectionName,
+        IReadOnlyList<string> directoryPaths,
+        CancellationToken cancellationToken = default)
+    {
+        if (directoryPaths.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        lock (_gate)
+        {
+            if (_entriesByWorkspace.TryGetValue(collectionName, out var entries))
+            {
+                var directories = directoryPaths.Select(NormalizePath).ToArray();
+                entries.RemoveAll(entry => directories.Any(directory => IsPathUnderRoot(entry.Chunk.FilePath, directory)));
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
     public Task DeleteWorkspaceAsync(string workspaceRoot, CancellationToken cancellationToken = default)
         => DeleteCollectionAsync(workspaceRoot, cancellationToken);
 
@@ -188,6 +211,15 @@ public sealed class InMemoryVectorStore : IVectorStore
             char.IsAsciiLetter(path[0]) &&
             path[1] == ':' &&
             (path[2] == '\\' || path[2] == '/');
+
+    private static bool IsPathUnderRoot(string path, string root)
+    {
+        var normalizedPath = NormalizePath(path);
+        var normalizedRoot = NormalizePath(root).TrimEnd('\\', '/');
+        return string.Equals(normalizedPath, normalizedRoot, StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.StartsWith(normalizedRoot + '\\', StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.StartsWith(normalizedRoot + '/', StringComparison.OrdinalIgnoreCase);
+    }
 
     private static double KeywordScore(string text, IReadOnlyList<string> tokens)
     {

@@ -584,6 +584,49 @@ public sealed class WorkspaceIndexerTests
     }
 
     [Fact]
+    public async Task IndexAsync_ResumeWithNewExcludeCleansExcludedDirectoryFromStagingIndex()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var keep = workspace.WriteFile("src/Keep.cs", "keep");
+        var excludedCompleted = workspace.WriteFile("github-worktree/Completed.cs", "completed");
+        workspace.WriteFile("github-worktree/Nested/Remaining.cs", "remaining");
+        var excludedDirectory = Path.Combine(workspace.RootPath, "github-worktree");
+        var stateStore = new FakeStateStore(
+            State(workspace.RootPath, FileState(excludedCompleted, chunkCount: 1)) with
+            {
+                IsComplete = false,
+                IndexingCollectionName = "ragnet-stage-resume"
+            });
+        var vectorStore = new FakeVectorStore();
+        var analyzer = new FakeAnalyzer();
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            stateStore,
+            vectorStore,
+            analyzer,
+            options: new RagNetOptions
+            {
+                Indexing = new IndexingOptions
+                {
+                    MaxFilesPerBatch = 1
+                }
+            });
+
+        var result = await indexer.IndexAsync(workspace.RootPath, excludeDirectories: ["github-worktree"]);
+
+        var upserted = Assert.Single(vectorStore.UpsertedChunks);
+        Assert.Equal(Path.GetFullPath(keep), upserted.FilePath);
+        Assert.Contains(result.Warnings, warning => warning.Contains("Resuming an incomplete index", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(Path.GetFullPath(excludedCompleted), vectorStore.DeletedFiles);
+        Assert.Contains(
+            vectorStore.DeletedDirectories,
+            directory => string.Equals(directory, Path.GetFullPath(excludedDirectory), StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(analyzer.AnalyzedFiles, file => file.Contains("github-worktree", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(stateStore.SavedState!.Files.Keys, file => file.Contains("github-worktree", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Warnings, warning => warning.Contains("newly excluded", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task IndexAsync_ReusesEmbeddingForDuplicateChunkContent()
     {
         using var workspace = new TemporaryWorkspace();
@@ -1446,6 +1489,8 @@ public sealed class WorkspaceIndexerTests
     {
         public List<string> DeletedFiles { get; } = [];
 
+        public List<string> DeletedDirectories { get; } = [];
+
         public List<string> DeletedCollections { get; } = [];
 
         public List<CodeChunk> UpsertedChunks { get; } = [];
@@ -1504,6 +1549,16 @@ public sealed class WorkspaceIndexerTests
         public Task DeleteByFilesAsync(string workspaceRoot, string collectionName, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default)
         {
             DeletedFiles.AddRange(filePaths.Select(Path.GetFullPath));
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteByDirectoriesAsync(string workspaceRoot, string collectionName, IReadOnlyList<string> directoryPaths, CancellationToken cancellationToken = default)
+        {
+            foreach (var directoryPath in directoryPaths)
+            {
+                DeletedDirectories.Add(Path.GetFullPath(directoryPath));
+            }
+
             return Task.CompletedTask;
         }
 

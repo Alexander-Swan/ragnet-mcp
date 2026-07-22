@@ -221,9 +221,16 @@ public sealed class WorkspaceIndexer(
             targetRelativePaths,
             Status: IndexedWorkspaceStatuses.Indexing), cancellationToken);
 
+        await CleanupExcludedDirectoriesFromIncompleteIndexAsync(
+            analysis,
+            targetCollectionName,
+            cancellationToken,
+            progress);
+
         var filesToDelete = analysis.DeletedFiles.Concat(analysis.ChangedFiles).ToArray();
         Report(progress, workspaceRoot, IndexingProgressStage.DeletingVectors, 0, filesToDelete.Length, "Deleting stale vectors.");
-        if (filesToDelete.Length > 0 && (analysis.MergeScopedState || !analysis.FullReindex))
+        if (filesToDelete.Length > 0 &&
+            (analysis.MergeScopedState || !analysis.FullReindex || !analysis.PreviousState.IsComplete))
         {
             cancellationToken.ThrowIfCancellationRequested();
             await vectorStore.DeleteByFilesAsync(workspaceRoot, targetCollectionName, filesToDelete, cancellationToken);
@@ -443,6 +450,45 @@ public sealed class WorkspaceIndexer(
         }
 
         return new StreamedIndexResult(chunkCountsByFile, embeddedChunks);
+    }
+
+    private async Task CleanupExcludedDirectoriesFromIncompleteIndexAsync(
+        WorkspaceIndexAnalysis analysis,
+        string targetCollectionName,
+        CancellationToken cancellationToken,
+        IProgress<IndexingProgress>? progress)
+    {
+        if (analysis.PreviousState.IsComplete)
+        {
+            return;
+        }
+
+        var excludedDirectoryRoots = EnumerateExcludedDirectoryRoots(analysis.TargetPlan)
+            .Concat(analysis.PreviousState.Files.Keys.Select(file => GetExcludedDirectoryRootForFile(analysis.TargetPlan.WorkspaceRoot, file, analysis.TargetPlan.ExcludeDirectories)))
+            .Where(directory => !string.IsNullOrWhiteSpace(directory))
+            .Select(directory => directory!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (excludedDirectoryRoots.Length == 0)
+        {
+            return;
+        }
+
+        Report(
+            progress,
+            analysis.TargetPlan.WorkspaceRoot,
+            IndexingProgressStage.DeletingVectors,
+            0,
+            excludedDirectoryRoots.Length,
+            "Cleaning excluded directories from incomplete index.");
+        await vectorStore.DeleteByDirectoriesAsync(
+            analysis.TargetPlan.WorkspaceRoot,
+            targetCollectionName,
+            excludedDirectoryRoots,
+            cancellationToken);
+        analysis.Warnings.Add(
+            $"Removed vectors under {excludedDirectoryRoots.Length} newly excluded director{(excludedDirectoryRoots.Length == 1 ? "y" : "ies")} from the incomplete index before resuming.");
     }
 
     private async Task SaveIncompleteIndexStateIfDueAsync(
@@ -1336,6 +1382,112 @@ public sealed class WorkspaceIndexer(
         }
     }
 
+    private IReadOnlyList<string> EnumerateExcludedDirectoryRoots(WorkspaceIndexTargetPlan targetPlan)
+    {
+        var excluded = BuildExcludeSet(targetPlan.ExcludeDirectories);
+        if (excluded.Count == 0)
+        {
+            return [];
+        }
+
+        var results = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var exclude in excluded)
+        {
+            var directPath = NormalizePath(Path.Combine(targetPlan.WorkspaceRoot, exclude));
+            if (Directory.Exists(directPath) && TargetPlanCanContainDirectory(targetPlan, directPath))
+            {
+                results.Add(directPath);
+            }
+        }
+
+        var roots = targetPlan.IsFullWorkspace
+            ? [targetPlan.WorkspaceRoot]
+            : targetPlan.ScanRoots
+                .Concat(targetPlan.DeleteRoots)
+                .Concat(targetPlan.Files
+                    .Select(Path.GetDirectoryName)
+                    .Where(directory => !string.IsNullOrWhiteSpace(directory))
+                    .Select(directory => directory!))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        var pending = new Stack<string>(roots.Where(Directory.Exists).Select(NormalizePath));
+
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop();
+            IEnumerable<string> subdirectories;
+            try
+            {
+                subdirectories = Directory.EnumerateDirectories(directory);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            foreach (var child in subdirectories)
+            {
+                if (IsExcludedDirectory(targetPlan.WorkspaceRoot, child, excluded))
+                {
+                    results.Add(NormalizePath(child));
+                    continue;
+                }
+
+                pending.Push(child);
+            }
+        }
+
+        return results.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private string? GetExcludedDirectoryRootForFile(string workspaceRoot, string filePath, IReadOnlyList<string> excludeDirectories)
+    {
+        var excluded = BuildExcludeSet(excludeDirectories);
+        var relativePath = Path.GetRelativePath(workspaceRoot, NormalizePath(filePath));
+        if (relativePath.StartsWith("..", StringComparison.Ordinal) ||
+            Path.IsPathRooted(relativePath))
+        {
+            return null;
+        }
+
+        var segments = relativePath
+            .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar, '\\', '/'], StringSplitOptions.RemoveEmptyEntries);
+        foreach (var exclude in excluded)
+        {
+            var excludeSegments = exclude
+                .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar, '\\', '/'], StringSplitOptions.RemoveEmptyEntries);
+            if (excludeSegments.Length == 0 || excludeSegments.Length >= segments.Length)
+            {
+                continue;
+            }
+
+            for (var index = 0; index <= segments.Length - excludeSegments.Length - 1; index++)
+            {
+                if (!SegmentsMatch(segments, excludeSegments, index))
+                {
+                    continue;
+                }
+
+                return NormalizePath(Path.Combine([workspaceRoot, .. segments.Take(index + excludeSegments.Length)]));
+            }
+        }
+
+        return null;
+    }
+
+    private static bool SegmentsMatch(IReadOnlyList<string> segments, IReadOnlyList<string> expected, int startIndex)
+    {
+        for (var index = 0; index < expected.Count; index++)
+        {
+            if (!string.Equals(segments[startIndex + index], expected[index], StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private IReadOnlyList<string> EnumerateTargetFiles(WorkspaceIndexTargetPlan targetPlan)
     {
         var files = new HashSet<string>(targetPlan.Files, StringComparer.OrdinalIgnoreCase);
@@ -1386,6 +1538,12 @@ public sealed class WorkspaceIndexer(
         return targetPlan.Files.Any(file => string.Equals(file, normalized, StringComparison.OrdinalIgnoreCase)) ||
             targetPlan.ScanRoots.Any(root => IsPathUnderRoot(normalized, root));
     }
+
+    private static bool TargetPlanCanContainDirectory(WorkspaceIndexTargetPlan targetPlan, string directoryPath)
+        => targetPlan.IsFullWorkspace ||
+            targetPlan.ScanRoots.Any(root => IsPathUnderRoot(directoryPath, root) || IsPathUnderRoot(root, directoryPath)) ||
+            targetPlan.DeleteRoots.Any(root => IsPathUnderRoot(directoryPath, root) || IsPathUnderRoot(root, directoryPath)) ||
+            targetPlan.Files.Any(file => IsPathUnderRoot(file, directoryPath));
 
     private IReadOnlyList<string> ResolveSolutionProjects(string solutionPath, CancellationToken cancellationToken)
     {
