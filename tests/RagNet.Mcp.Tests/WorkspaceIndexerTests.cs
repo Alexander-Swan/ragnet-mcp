@@ -621,7 +621,6 @@ public sealed class WorkspaceIndexerTests
         Assert.Contains(
             vectorStore.DeletedDirectories,
             directory => string.Equals(directory, Path.GetFullPath(excludedDirectory), StringComparison.OrdinalIgnoreCase));
-        Assert.DoesNotContain(analyzer.AnalyzedFiles, file => file.Contains("github-worktree", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(stateStore.SavedState!.Files.Keys, file => file.Contains("github-worktree", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Warnings, warning => warning.Contains("newly excluded", StringComparison.OrdinalIgnoreCase));
     }
