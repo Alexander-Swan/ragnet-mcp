@@ -998,6 +998,10 @@ public sealed class WorkspaceIndexer(
         var previousScopedFiles = previousState.Files.Values
             .Where(file => FileMatchesProfile(file.FilePath, indexProfile) && targetPlan.CanDeleteMissingFile(file.FilePath))
             .ToArray();
+        var excludedPreviousFiles = previousScopedFiles
+            .Where(file => GetExcludedDirectoryRootForFile(targetPlan.WorkspaceRoot, file.FilePath, targetPlan.ExcludeDirectories) is not null)
+            .Select(file => file.FilePath)
+            .ToArray();
 
         if (force || fullReindex || !previousState.StateExists)
         {
@@ -1027,6 +1031,7 @@ public sealed class WorkspaceIndexer(
             .ToArray();
         var deletedFiles = changeSet.DeletedFiles
             .Where(file => FileMatchesProfile(file, indexProfile) && targetPlan.CanDeleteMissingFile(file))
+            .Concat(excludedPreviousFiles)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         var changedSet = changedFiles.ToHashSet(StringComparer.OrdinalIgnoreCase);

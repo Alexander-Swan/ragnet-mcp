@@ -181,6 +181,40 @@ public sealed class WorkspaceIndexerTests
     }
 
     [Fact]
+    public async Task IndexAsync_CompletedWorkspaceDeletesNewlyExcludedStateWhenChangeDetectorReportsNoChanges()
+    {
+        using var workspace = new TemporaryWorkspace();
+        var keep = workspace.WriteFile("src/Keep.cs", "keep");
+        var excluded = workspace.WriteFile("github-worktree/Indexed.cs", "indexed");
+        var detector = new FakeSourceChangeDetector(changeSet: new SourceChangeSet(
+            "git",
+            IsAvailable: true,
+            ChangedFiles: [],
+            DeletedFiles: [])
+        {
+            IsComplete = true
+        });
+        var stateStore = new FakeStateStore(State(
+            workspace.RootPath,
+            FileState(keep),
+            FileState(excluded)));
+        var vectorStore = new FakeVectorStore();
+        var indexer = CreateIndexer(
+            workspace.RootPath,
+            stateStore,
+            vectorStore,
+            new FakeAnalyzer(),
+            sourceChangeDetector: detector);
+
+        await indexer.IndexAsync(workspace.RootPath, excludeDirectories: ["github-worktree"]);
+
+        Assert.Contains(Path.GetFullPath(excluded), vectorStore.DeletedFiles);
+        Assert.Contains(Path.GetFullPath(keep), stateStore.SavedState!.Files.Keys);
+        Assert.DoesNotContain(Path.GetFullPath(excluded), stateStore.SavedState.Files.Keys);
+        Assert.True(detector.WasCalled);
+    }
+
+    [Fact]
     public async Task IndexAsync_PassesPreviousCommitToSourceChangeDetectorForSameGitWorkspace()
     {
         using var workspace = new TemporaryWorkspace();
